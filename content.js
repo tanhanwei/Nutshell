@@ -9,6 +9,7 @@
   let hideTimeout = null;
   let lastProcessedUrl = null;
   let currentlyProcessingUrl = null;
+  let currentlyDisplayedUrl = null; // Track what URL the tooltip is currently showing
   let processingElement = null; // Track element being processed for positioning
   let tooltip = null;
   let displayMode = 'both';
@@ -96,11 +97,21 @@
   }
   
   // Schedule hiding tooltip with delay
-  function scheduleHide(delay = 300) {
+  function scheduleHide(delay = 500, forUrl = null) {
+    const shortUrl = forUrl ? getShortUrl(forUrl) : 'none';
+    console.log(`⏲️ SCHEDULE HIDE: for "${shortUrl}" in ${delay}ms (currently showing: "${currentlyDisplayedUrl ? getShortUrl(currentlyDisplayedUrl) : 'none'}")`);
+    
     clearTimeout(hideTimeout);
     hideTimeout = setTimeout(() => {
-      if (!isMouseInTooltip) {
+      const currentShortUrl = currentlyDisplayedUrl ? getShortUrl(currentlyDisplayedUrl) : 'none';
+      // Only hide if:
+      // 1. Mouse is not in tooltip
+      // 2. Either no URL specified, or the tooltip is still showing this URL's content
+      if (!isMouseInTooltip && (!forUrl || currentlyDisplayedUrl === forUrl)) {
+        console.log(`🔽 EXECUTING HIDE: scheduled for "${shortUrl}", currently showing "${currentShortUrl}" - HIDING NOW`);
         hideTooltip();
+      } else {
+        console.log(`🚫 SKIP HIDE: scheduled for "${shortUrl}", currently showing "${currentShortUrl}" (mouse in tooltip: ${isMouseInTooltip}, URL match: ${currentlyDisplayedUrl === forUrl})`);
       }
     }, delay);
   }
@@ -109,6 +120,9 @@
   function showTooltip(element, content, url) {
     if (displayMode === 'panel') return;
     
+    const shortUrl = url ? getShortUrl(url) : 'unknown';
+    console.log(`📤 SHOW TOOLTIP: "${shortUrl}" (was showing: "${currentlyDisplayedUrl ? getShortUrl(currentlyDisplayedUrl) : 'none'}")`);
+    
     // Cancel any pending hide
     clearTimeout(hideTimeout);
     hideTimeout = null;
@@ -116,6 +130,9 @@
     const tooltipEl = createTooltip();
     tooltipEl.innerHTML = content;
     tooltipEl.style.display = 'block';
+    
+    // Track what URL is currently displayed
+    currentlyDisplayedUrl = url;
     
     positionTooltip(element);
     
@@ -132,10 +149,15 @@
   // Hide tooltip immediately
   function hideTooltip() {
     if (tooltip) {
+      const wasShowing = currentlyDisplayedUrl ? getShortUrl(currentlyDisplayedUrl) : 'none';
+      console.log(`📥 HIDE TOOLTIP: was showing "${wasShowing}"`);
+      
       tooltip.style.opacity = '0';
+      currentlyDisplayedUrl = null; // Clear displayed URL when hiding
       setTimeout(() => {
         if (tooltip && !isMouseInTooltip) {
           tooltip.style.display = 'none';
+          console.log(`🔒 TOOLTIP CLOSED: display set to none`);
         }
       }, 200);
     }
@@ -145,6 +167,10 @@
   function updateTooltipContent(content, url) {
     if (displayMode === 'panel') return;
     
+    const shortUrl = url ? getShortUrl(url) : 'unknown';
+    const wasShowing = currentlyDisplayedUrl ? getShortUrl(currentlyDisplayedUrl) : 'none';
+    console.log(`🔄 UPDATE TOOLTIP: "${shortUrl}" (was showing: "${wasShowing}", visible: ${tooltip && tooltip.style.display === 'block'})`);
+    
     // Cancel any pending hide when new content arrives (keep tooltip visible during streaming)
     clearTimeout(hideTimeout);
     hideTimeout = null;
@@ -153,11 +179,15 @@
       // Show tooltip if it's not visible (streaming content arrived)
       if (tooltip.style.display !== 'block') {
         tooltip.style.display = 'block';
+        console.log(`  └─ 👁️ Making tooltip visible`);
         // Record display time when showing for first time
         if (url) {
           displayTimes.set(url, Date.now());
         }
       }
+      
+      // Track what URL is currently displayed
+      currentlyDisplayedUrl = url;
       
       tooltip.innerHTML = content;
       tooltip.style.opacity = '1';
@@ -223,6 +253,13 @@
       return;
     }
     
+    // Cancel any pending hide when hovering a new link (critical for preventing blinks!)
+    if (hideTimeout) {
+      console.log(`🚫 CANCEL HIDE: starting hover on "${shortUrl}"`);
+      clearTimeout(hideTimeout);
+      hideTimeout = null;
+    }
+    
     console.log(`✅ HOVER: ${linkType} "${shortUrl}" (will trigger in ${HOVER_DELAY}ms)`);
     
     currentHoveredElement = link;
@@ -278,12 +315,12 @@
         setTimeout(() => {
           if (!isMouseInTooltip && !currentHoveredElement) {
             console.log(`⏰ Protection window expired for "${shortUrl}", now scheduling hide`);
-            scheduleHide(300);
+            scheduleHide(500, url); // 500ms > 300ms hover delay to prevent race condition
           }
         }, remainingTime);
       } else {
-        console.log(`👋 MOUSEOUT: "${shortUrl}" (scheduling hide in 300ms, reason: ${urlDisplayTime === 0 ? 'never displayed' : `too long ago (${timeSinceDisplay}ms)`})`);
-        scheduleHide(300);
+        console.log(`👋 MOUSEOUT: "${shortUrl}" (scheduling hide in 500ms, reason: ${urlDisplayTime === 0 ? 'never displayed' : `too long ago (${timeSinceDisplay}ms)`})`);
+        scheduleHide(500, url); // 500ms > 300ms hover delay to prevent race condition
       }
     }
     
