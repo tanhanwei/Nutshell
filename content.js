@@ -14,6 +14,7 @@
   let displayMode = 'both';
   let currentHoveredElement = null;
   let isMouseInTooltip = false;
+  let lastDisplayTime = 0; // Track when content was last displayed
   
   // Create tooltip
   function createTooltip() {
@@ -118,6 +119,9 @@
     
     positionTooltip(element);
     
+    // Record display time for protection window
+    lastDisplayTime = Date.now();
+    
     requestAnimationFrame(() => {
       tooltipEl.style.opacity = '1';
     });
@@ -147,6 +151,8 @@
       // Show tooltip if it's not visible (streaming content arrived)
       if (tooltip.style.display !== 'block') {
         tooltip.style.display = 'block';
+        // Record display time when showing for first time
+        lastDisplayTime = Date.now();
       }
       
       tooltip.innerHTML = content;
@@ -246,14 +252,30 @@
       }
     }
     
-    console.log(`👋 MOUSEOUT: "${shortUrl}" (scheduling hide in 300ms)`);
+    // Check if content was just displayed (protection window)
+    const timeSinceDisplay = Date.now() - lastDisplayTime;
+    const MIN_DISPLAY_TIME = 500; // Minimum time to show content before allowing hide
+    
+    if (timeSinceDisplay < MIN_DISPLAY_TIME && lastDisplayTime > 0) {
+      // Content was just displayed, use longer delay to give user time to see it
+      const remainingTime = MIN_DISPLAY_TIME - timeSinceDisplay;
+      console.log(`👋 MOUSEOUT: "${shortUrl}" (content just shown, waiting ${Math.round(remainingTime)}ms before scheduling hide)`);
+      
+      // Schedule hide after the protection window expires
+      setTimeout(() => {
+        if (!isMouseInTooltip && !currentHoveredElement) {
+          console.log(`⏰ Protection window expired for "${shortUrl}", now scheduling hide`);
+          scheduleHide(300);
+        }
+      }, remainingTime);
+    } else {
+      console.log(`👋 MOUSEOUT: "${shortUrl}" (scheduling hide in 300ms)`);
+      scheduleHide(300);
+    }
     
     // Cancel pending hover
     clearTimeout(currentHoverTimeout);
     currentHoverTimeout = null;
-    
-    // Schedule hide with delay (unless mouse moves into tooltip)
-    scheduleHide(300);
     
     currentHoveredElement = null;
   }
