@@ -14,7 +14,7 @@
   let displayMode = 'both';
   let currentHoveredElement = null;
   let isMouseInTooltip = false;
-  let lastDisplayTime = 0; // Track when content was last displayed
+  let displayTimes = new Map(); // Track when each URL was displayed (url -> timestamp)
   
   // Create tooltip
   function createTooltip() {
@@ -106,7 +106,7 @@
   }
   
   // Show tooltip
-  function showTooltip(element, content) {
+  function showTooltip(element, content, url) {
     if (displayMode === 'panel') return;
     
     // Cancel any pending hide
@@ -119,8 +119,10 @@
     
     positionTooltip(element);
     
-    // Record display time for protection window
-    lastDisplayTime = Date.now();
+    // Record display time for this URL (for protection window)
+    if (url) {
+      displayTimes.set(url, Date.now());
+    }
     
     requestAnimationFrame(() => {
       tooltipEl.style.opacity = '1';
@@ -140,7 +142,7 @@
   }
   
   // Update tooltip content
-  function updateTooltipContent(content) {
+  function updateTooltipContent(content, url) {
     if (displayMode === 'panel') return;
     
     // Cancel any pending hide when new content arrives (keep tooltip visible during streaming)
@@ -152,7 +154,9 @@
       if (tooltip.style.display !== 'block') {
         tooltip.style.display = 'block';
         // Record display time when showing for first time
-        lastDisplayTime = Date.now();
+        if (url) {
+          displayTimes.set(url, Date.now());
+        }
       }
       
       tooltip.innerHTML = content;
@@ -258,13 +262,14 @@
       // Don't schedule hide - streaming updates will keep it visible
       // It will only hide when streaming completes or user switches to different URL
     } else {
-      // Check if content was just displayed (protection window)
-      const timeSinceDisplay = Date.now() - lastDisplayTime;
+      // Check if THIS URL's content was just displayed (protection window)
+      const urlDisplayTime = displayTimes.get(url) || 0;
+      const timeSinceDisplay = urlDisplayTime > 0 ? Date.now() - urlDisplayTime : Infinity;
       const MIN_DISPLAY_TIME = 500; // Minimum time to show content before allowing hide
       
-      console.log(`[DEBUG] lastDisplayTime: ${lastDisplayTime}, timeSinceDisplay: ${timeSinceDisplay}ms`);
+      console.log(`[DEBUG] URL: "${shortUrl}", displayTime: ${urlDisplayTime}, timeSinceDisplay: ${timeSinceDisplay}ms`);
       
-      if (timeSinceDisplay < MIN_DISPLAY_TIME && lastDisplayTime > 0) {
+      if (timeSinceDisplay < MIN_DISPLAY_TIME && urlDisplayTime > 0) {
         // Content was just displayed, use longer delay to give user time to see it
         const remainingTime = MIN_DISPLAY_TIME - timeSinceDisplay;
         console.log(`👋 MOUSEOUT: "${shortUrl}" (content just shown, waiting ${Math.round(remainingTime)}ms before scheduling hide)`);
@@ -277,7 +282,7 @@
           }
         }, remainingTime);
       } else {
-        console.log(`👋 MOUSEOUT: "${shortUrl}" (scheduling hide in 300ms, reason: ${lastDisplayTime === 0 ? 'never displayed' : `too long ago (${timeSinceDisplay}ms)`})`);
+        console.log(`👋 MOUSEOUT: "${shortUrl}" (scheduling hide in 300ms, reason: ${urlDisplayTime === 0 ? 'never displayed' : `too long ago (${timeSinceDisplay}ms)`})`);
         scheduleHide(300);
       }
     }
@@ -307,7 +312,7 @@
     
     // Show loading state in tooltip
     if (displayMode === 'tooltip' || displayMode === 'both') {
-      showTooltip(link, '<div style="text-align:center;padding:20px;opacity:0.6;">Extracting content...</div>');
+      showTooltip(link, '<div style="text-align:center;padding:20px;opacity:0.6;">Extracting content...</div>', url);
     }
     
     // Fetch HTML
@@ -319,7 +324,7 @@
     if (response.error) {
       console.error('[Content] Fetch error:', response.error);
       if (displayMode === 'tooltip' || displayMode === 'both') {
-        showTooltip(link, `<div style="padding:10px;background:#fee;border-radius:8px;">Error: ${response.error}</div>`);
+        showTooltip(link, `<div style="padding:10px;background:#fee;border-radius:8px;">Error: ${response.error}</div>`, url);
       }
       currentlyProcessingUrl = null;
       processingElement = null;
@@ -351,7 +356,7 @@
     
     // Show generating state
     if (displayMode === 'tooltip' || displayMode === 'both') {
-      showTooltip(link, `<div style="opacity:0.6;font-style:italic;">Generating summary...</div>`);
+      showTooltip(link, `<div style="opacity:0.6;font-style:italic;">Generating summary...</div>`, url);
     }
     
     // Request summarization from background
@@ -385,7 +390,7 @@
     if (result.status === 'error') {
       console.error(`❌ ERROR: "${shortUrl}" - ${result.error}`);
       if (displayMode === 'tooltip' || displayMode === 'both' && isStillCurrent) {
-        showTooltip(link, `<div style="padding:10px;background:#fee;border-radius:8px;">Error: ${result.error}</div>`);
+        showTooltip(link, `<div style="padding:10px;background:#fee;border-radius:8px;">Error: ${result.error}</div>`, url);
       }
       // Only clear if this was the current URL
       if (isStillCurrent) {
@@ -406,7 +411,7 @@
         
         // Show in tooltip
         if (displayMode === 'tooltip' || displayMode === 'both') {
-          showTooltip(link, formattedSummary);
+          showTooltip(link, formattedSummary, url);
         }
         
         // Send to sidepanel
@@ -442,7 +447,7 @@
     if (message.type === 'STREAMING_UPDATE') {
       // Only update if this is for the URL we're currently processing
       if (message.url === currentlyProcessingUrl) {
-        updateTooltipContent(message.content);
+        updateTooltipContent(message.content, message.url);
       } else {
         const shortUrl = getShortUrl(message.url);
         console.log(`⚠️ STALE STREAM UPDATE: "${shortUrl}" (ignoring, current: "${currentlyProcessingUrl ? getShortUrl(currentlyProcessingUrl) : 'none'}")`);
@@ -452,7 +457,7 @@
     if (message.type === 'PROCESSING_STATUS') {
       if (message.status === 'started' && currentHoveredElement) {
         if (displayMode === 'tooltip' || displayMode === 'both') {
-          showTooltip(currentHoveredElement, `<div style="opacity:0.6;font-style:italic;">Generating summary...</div>`);
+          showTooltip(currentHoveredElement, `<div style="opacity:0.6;font-style:italic;">Generating summary...</div>`, message.url);
         }
       }
     }
