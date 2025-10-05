@@ -252,25 +252,32 @@
       }
     }
     
-    // Check if content was just displayed (protection window)
-    const timeSinceDisplay = Date.now() - lastDisplayTime;
-    const MIN_DISPLAY_TIME = 500; // Minimum time to show content before allowing hide
-    
-    if (timeSinceDisplay < MIN_DISPLAY_TIME && lastDisplayTime > 0) {
-      // Content was just displayed, use longer delay to give user time to see it
-      const remainingTime = MIN_DISPLAY_TIME - timeSinceDisplay;
-      console.log(`👋 MOUSEOUT: "${shortUrl}" (content just shown, waiting ${Math.round(remainingTime)}ms before scheduling hide)`);
-      
-      // Schedule hide after the protection window expires
-      setTimeout(() => {
-        if (!isMouseInTooltip && !currentHoveredElement) {
-          console.log(`⏰ Protection window expired for "${shortUrl}", now scheduling hide`);
-          scheduleHide(300);
-        }
-      }, remainingTime);
+    // Don't schedule hide if we're actively processing/streaming this URL
+    if (currentlyProcessingUrl === url) {
+      console.log(`👋 MOUSEOUT: "${shortUrl}" (streaming active, tooltip will stay visible)`);
+      // Don't schedule hide - streaming updates will keep it visible
+      // It will only hide when streaming completes or user switches to different URL
     } else {
-      console.log(`👋 MOUSEOUT: "${shortUrl}" (scheduling hide in 300ms)`);
-      scheduleHide(300);
+      // Check if content was just displayed (protection window)
+      const timeSinceDisplay = Date.now() - lastDisplayTime;
+      const MIN_DISPLAY_TIME = 500; // Minimum time to show content before allowing hide
+      
+      if (timeSinceDisplay < MIN_DISPLAY_TIME && lastDisplayTime > 0) {
+        // Content was just displayed, use longer delay to give user time to see it
+        const remainingTime = MIN_DISPLAY_TIME - timeSinceDisplay;
+        console.log(`👋 MOUSEOUT: "${shortUrl}" (content just shown, waiting ${Math.round(remainingTime)}ms before scheduling hide)`);
+        
+        // Schedule hide after the protection window expires
+        setTimeout(() => {
+          if (!isMouseInTooltip && !currentHoveredElement) {
+            console.log(`⏰ Protection window expired for "${shortUrl}", now scheduling hide`);
+            scheduleHide(300);
+          }
+        }, remainingTime);
+      } else {
+        console.log(`👋 MOUSEOUT: "${shortUrl}" (scheduling hide in 300ms)`);
+        scheduleHide(300);
+      }
     }
     
     // Cancel pending hover
