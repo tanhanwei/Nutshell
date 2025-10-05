@@ -9,6 +9,7 @@
   let hideTimeout = null;
   let lastProcessedUrl = null;
   let currentlyProcessingUrl = null;
+  let processingElement = null; // Track element being processed for positioning
   let tooltip = null;
   let displayMode = 'both';
   let currentHoveredElement = null;
@@ -137,11 +138,24 @@
   // Update tooltip content
   function updateTooltipContent(content) {
     if (displayMode === 'panel') return;
-    if (tooltip && tooltip.style.display === 'block') {
+    
+    // Cancel any pending hide when new content arrives (keep tooltip visible during streaming)
+    clearTimeout(hideTimeout);
+    hideTimeout = null;
+    
+    if (tooltip) {
+      // Show tooltip if it's not visible (streaming content arrived)
+      if (tooltip.style.display !== 'block') {
+        tooltip.style.display = 'block';
+      }
+      
       tooltip.innerHTML = content;
-      // Reposition in case size changed
-      if (currentHoveredElement) {
-        positionTooltip(currentHoveredElement);
+      tooltip.style.opacity = '1';
+      
+      // Reposition in case size changed (use processingElement if currentHoveredElement is gone)
+      const elementForPositioning = currentHoveredElement || processingElement;
+      if (elementForPositioning) {
+        positionTooltip(elementForPositioning);
       }
     }
   }
@@ -256,6 +270,7 @@
     
     // Mark this URL as currently being processed
     currentlyProcessingUrl = url;
+    processingElement = link; // Track element for positioning during streaming
     
     console.log(`🔄 PROCESSING: "${shortUrl}"`);
     
@@ -276,6 +291,7 @@
         showTooltip(link, `<div style="padding:10px;background:#fee;border-radius:8px;">Error: ${response.error}</div>`);
       }
       currentlyProcessingUrl = null;
+      processingElement = null;
       return;
     }
     
@@ -323,6 +339,7 @@
       // Only clear if this was the current URL
       if (isStillCurrent) {
         currentlyProcessingUrl = null;
+        processingElement = null;
       }
       return;
     }
@@ -342,6 +359,7 @@
       // Only clear if this was the current URL
       if (isStillCurrent) {
         currentlyProcessingUrl = null;
+        processingElement = null;
       }
       return;
     }
@@ -371,6 +389,7 @@
         
         // Done processing this URL
         currentlyProcessingUrl = null;
+        processingElement = null;
         console.log(`✅ COMPLETE: "${shortUrl}" (ready for next hover)`);
       } else {
         console.log(`⚠️ STALE CACHED: "${shortUrl}" (user moved on, ignoring)`);
