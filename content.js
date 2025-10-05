@@ -262,6 +262,8 @@
       const timeSinceDisplay = Date.now() - lastDisplayTime;
       const MIN_DISPLAY_TIME = 500; // Minimum time to show content before allowing hide
       
+      console.log(`[DEBUG] lastDisplayTime: ${lastDisplayTime}, timeSinceDisplay: ${timeSinceDisplay}ms`);
+      
       if (timeSinceDisplay < MIN_DISPLAY_TIME && lastDisplayTime > 0) {
         // Content was just displayed, use longer delay to give user time to see it
         const remainingTime = MIN_DISPLAY_TIME - timeSinceDisplay;
@@ -275,7 +277,7 @@
           }
         }, remainingTime);
       } else {
-        console.log(`👋 MOUSEOUT: "${shortUrl}" (scheduling hide in 300ms)`);
+        console.log(`👋 MOUSEOUT: "${shortUrl}" (scheduling hide in 300ms, reason: ${lastDisplayTime === 0 ? 'never displayed' : `too long ago (${timeSinceDisplay}ms)`})`);
         scheduleHide(300);
       }
     }
