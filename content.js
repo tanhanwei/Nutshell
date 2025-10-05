@@ -8,6 +8,7 @@
   let currentHoverTimeout = null;
   let hideTimeout = null;
   let lastProcessedUrl = null;
+  let currentlyProcessingUrl = null;
   let tooltip = null;
   let displayMode = 'both';
   let currentHoveredElement = null;
@@ -162,6 +163,13 @@
     const link = findLink(e.target);
     if (!link) return;
     
+    const url = link.href;
+    
+    // Don't re-trigger if we're already processing this exact URL
+    if (currentlyProcessingUrl === url) {
+      return;
+    }
+    
     currentHoveredElement = link;
     
     clearTimeout(currentHoverTimeout);
@@ -202,6 +210,9 @@
   async function processLinkHover(link) {
     const url = link.href;
     
+    // Mark this URL as currently being processed
+    currentlyProcessingUrl = url;
+    
     console.log('[Content] Processing hover for:', url);
     
     // Show loading state in tooltip
@@ -220,6 +231,7 @@
       if (displayMode === 'tooltip' || displayMode === 'both') {
         showTooltip(link, `<div style="padding:10px;background:#fee;border-radius:8px;">Error: ${response.error}</div>`);
       }
+      currentlyProcessingUrl = null;
       return;
     }
     
@@ -261,11 +273,13 @@
     
     if (result.status === 'duplicate') {
       console.log('[Content] Duplicate request, ignoring');
+      currentlyProcessingUrl = null;
       return;
     }
     
     if (result.status === 'aborted') {
       console.log('[Content] Request was aborted');
+      currentlyProcessingUrl = null;
       return;
     }
     
@@ -274,6 +288,7 @@
       if (displayMode === 'tooltip' || displayMode === 'both') {
         showTooltip(link, `<div style="padding:10px;background:#fee;border-radius:8px;">Error: ${result.error}</div>`);
       }
+      currentlyProcessingUrl = null;
       return;
     }
     
@@ -297,9 +312,13 @@
           summary: formattedSummary
         }).catch(() => {});
       }
+      
+      // Done processing this URL
+      currentlyProcessingUrl = null;
     }
     
     // If not cached, summary will arrive via STREAMING_UPDATE messages
+    // Note: For streaming, we keep currentlyProcessingUrl set until user hovers another link
   }
   
   // Listen for messages from background
