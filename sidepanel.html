@@ -2,13 +2,26 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <link rel="stylesheet" href="sidepanel.css">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <link rel="stylesheet" href="sidepanel.css?v=2">
 </head>
 <body>
   <div id="container">
     <!-- Settings Section (Always visible at top) -->
     <div id="settings-section">
       <h3>AI Summarization</h3>
+      
+      <!-- Display Mode Selection -->
+      <div class="setting-group">
+        <label class="setting-label" for="display-mode">Display Location:</label>
+        <select id="display-mode" class="setting-select">
+          <option value="both">Side Panel + Tooltip</option>
+          <option value="panel">Side Panel Only</option>
+          <option value="tooltip">Tooltip Only</option>
+        </select>
+      </div>
       
       <div class="radio-group">
         <label>
@@ -89,7 +102,6 @@
     </div>
   </div>
   
-  <script src="lib/Readability.js"></script>
-  <script src="sidepanel.js"></script>
+  <script src="sidepanel.js?v=2"></script>
 </body>
 </html>

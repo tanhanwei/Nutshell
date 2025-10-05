@@ -1,13 +1,519 @@
+// ========================================
+// AI APIS INITIALIZATION
+// ========================================
+
+// Compatibility layer for different Chrome AI API versions
+async function initializeSummarizerAPI() {
+  // Check for Summarization API
+  let summarizerAvailable = false;
+  
+  if ('Summarizer' in self) {
+    console.log('[Background] Found global Summarizer API');
+    summarizerAvailable = true;
+  } else if ('ai' in self && 'summarizer' in self.ai) {
+    console.log('[Background] Found ai.summarizer namespace');
+    summarizerAvailable = true;
+  }
+  
+  return {
+    summarizer: {
+      available: summarizerAvailable,
+      availability: summarizerAvailable 
+        ? () => ('Summarizer' in self ? Summarizer.availability({ outputLanguage: 'en' }) : ai.summarizer.availability({ outputLanguage: 'en' }))
+        : null,
+      create: summarizerAvailable
+        ? (options) => ('Summarizer' in self ? Summarizer.create(options) : ai.summarizer.create(options))
+        : null
+    },
+    promptAPI: {
+      available: 'LanguageModel' in self,
+      availability: 'LanguageModel' in self 
+        ? (options) => LanguageModel.availability(options || { expectedOutputs: [{ type: 'text', languages: ['en'] }] })
+        : null,
+      create: 'LanguageModel' in self ? (options) => LanguageModel.create(options) : null,
+      params: 'LanguageModel' in self ? () => LanguageModel.params() : null
+    }
+  };
+}
+
+// Global API reference
+let SummarizerAPI = null;
+
+// Initialize APIs on service worker startup
+(async function initAPIs() {
+  SummarizerAPI = await initializeSummarizerAPI();
+  console.log('[Background] APIs initialized:', SummarizerAPI);
+  
+  // Check Summarizer availability
+  if (SummarizerAPI.summarizer.available) {
+    try {
+      const summarizerAvailability = await SummarizerAPI.summarizer.availability();
+      console.log('[Background] Summarizer availability:', summarizerAvailability);
+      SummarizerAPI.summarizer.status = summarizerAvailability;
+    } catch (error) {
+      console.error('[Background] Summarizer availability check failed:', error);
+      SummarizerAPI.summarizer.status = 'unavailable';
+    }
+  } else {
+    SummarizerAPI.summarizer.status = 'unavailable';
+  }
+  
+  // Check Prompt API availability
+  if (SummarizerAPI.promptAPI.available) {
+    try {
+      const promptAvailability = await SummarizerAPI.promptAPI.availability({
+        expectedOutputs: [{ type: 'text', languages: ['en'] }]
+      });
+      console.log('[Background] Prompt API availability:', promptAvailability);
+      SummarizerAPI.promptAPI.status = promptAvailability;
+    } catch (error) {
+      console.error('[Background] Prompt API availability check failed:', error);
+      SummarizerAPI.promptAPI.status = 'unavailable';
+    }
+  } else {
+    SummarizerAPI.promptAPI.status = 'unavailable';
+  }
+})();
+
+// ========================================
+// SETTINGS MANAGEMENT
+// ========================================
+
+let settings = {
+  apiChoice: 'summarization',
+  customPrompt: 'Summarize this article in 2-3 sentences',
+  displayMode: 'both'
+};
+
+// Load settings from storage
+async function loadSettings() {
+  const stored = await chrome.storage.local.get(['apiChoice', 'customPrompt', 'displayMode']);
+  if (stored.apiChoice) settings.apiChoice = stored.apiChoice;
+  if (stored.customPrompt) settings.customPrompt = stored.customPrompt;
+  if (stored.displayMode) settings.displayMode = stored.displayMode;
+  console.log('[Background] Settings loaded:', settings);
+}
+
+// Initialize settings
+loadSettings();
+
+// Listen for settings changes
+chrome.storage.onChanged.addListener((changes, namespace) => {
+  if (namespace === 'local') {
+    if (changes.apiChoice) settings.apiChoice = changes.apiChoice.newValue;
+    if (changes.customPrompt) settings.customPrompt = changes.customPrompt.newValue;
+    if (changes.displayMode) settings.displayMode = changes.displayMode.newValue;
+    console.log('[Background] Settings updated:', settings);
+  }
+});
+
+// ========================================
+// CACHING & STATE MANAGEMENT
+// ========================================
+
+const htmlCache = {};
+const summaryCache = new Map();
+const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
+
+let currentAbortController = null;
+let isProcessingSummary = false;
+let lastProcessedUrl = null;
+
+// Clean cache periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, value] of summaryCache.entries()) {
+    if (now - value.timestamp > CACHE_DURATION) {
+      summaryCache.delete(key);
+    }
+  }
+  console.log(`[Background] Cache cleaned. ${summaryCache.size} entries remaining.`);
+}, 5 * 60 * 1000);
+
+// ========================================
+// AI SUMMARIZATION FUNCTIONS
+// ========================================
+
+async function summarizeContent(text, signal) {
+  if (settings.apiChoice === 'summarization') {
+    return await useSummarizationAPI(text, signal);
+  } else {
+    return await usePromptAPI(text, signal);
+  }
+}
+
+async function useSummarizationAPI(text, signal) {
+  if (!SummarizerAPI.summarizer.available) {
+    throw new Error('Summarizer API not available');
+  }
+  
+  const availability = SummarizerAPI.summarizer.status;
+  
+  if (availability === 'downloadable' || availability === 'downloading') {
+    throw new Error('MODEL_DOWNLOAD_REQUIRED');
+  }
+  
+  if (availability === 'unavailable') {
+    throw new Error('Summarizer API is unavailable on this device');
+  }
+  
+  if (availability !== 'available' && availability !== 'readily') {
+    throw new Error(`Summarizer API status is: ${availability}`);
+  }
+  
+  try {
+    const options = {
+      type: 'key-points',
+      format: 'markdown',
+      length: 'medium',
+      sharedContext: 'This is an article from a webpage.',
+      outputLanguage: 'en'
+    };
+    
+    const summarizer = await SummarizerAPI.summarizer.create(options);
+    
+    // Prepare text
+    const MAX_CHARS = 4000;
+    let processedText = text;
+    
+    if (text.length > MAX_CHARS) {
+      const partSize = Math.floor(MAX_CHARS / 3);
+      const start = text.slice(0, partSize);
+      const middle = text.slice(
+        Math.floor(text.length / 2 - partSize / 2),
+        Math.floor(text.length / 2 + partSize / 2)
+      );
+      const end = text.slice(-partSize);
+      
+      processedText = `${start}\n\n[...]\n\n${middle}\n\n[...]\n\n${end}`;
+    }
+    
+    console.log('[Background] Starting Summarizer streaming...');
+    const stream = summarizer.summarizeStreaming(processedText);
+    
+    let fullSummary = '';
+    for await (const chunk of stream) {
+      if (signal && signal.aborted) {
+        console.log('[Background] Summarizer streaming aborted');
+        throw new DOMException('Aborted', 'AbortError');
+      }
+      
+      fullSummary += chunk;
+      
+      // Broadcast streaming update to all listeners
+      broadcastStreamingUpdate(fullSummary);
+    }
+    
+    console.log('[Background] Summarizer streaming complete');
+    
+    if (summarizer.destroy) {
+      summarizer.destroy();
+    }
+    
+    return fullSummary;
+    
+  } catch (error) {
+    console.error('[Background] Summarization failed:', error);
+    throw error;
+  }
+}
+
+async function usePromptAPI(text, signal) {
+  if (!SummarizerAPI.promptAPI.available) {
+    throw new Error('Prompt API not available');
+  }
+  
+  const availability = SummarizerAPI.promptAPI.status;
+  
+  if (availability === 'unavailable') {
+    throw new Error('Prompt API not available on this device');
+  }
+  
+  if (availability === 'downloadable' || availability === 'downloading') {
+    throw new Error('MODEL_DOWNLOAD_REQUIRED');
+  }
+  
+  if (availability !== 'available' && availability !== 'readily') {
+    throw new Error(`Prompt API status is: ${availability}`);
+  }
+  
+  try {
+    const session = await SummarizerAPI.promptAPI.create({
+      expectedOutputs: [
+        { type: 'text', languages: ['en'] }
+      ]
+    });
+    
+    // Prepare text
+    const MAX_CHARS = 3000;
+    let processedText = text;
+    
+    if (text.length > MAX_CHARS) {
+      const partSize = Math.floor(MAX_CHARS / 3);
+      const start = text.slice(0, partSize);
+      const middle = text.slice(
+        Math.floor(text.length / 2 - partSize / 2),
+        Math.floor(text.length / 2 + partSize / 2)
+      );
+      const end = text.slice(-partSize);
+      
+      processedText = `${start}\n\n[...]\n\n${middle}\n\n[...]\n\n${end}`;
+    }
+    
+    const fullPrompt = `${settings.customPrompt}\n\nContent:\n${processedText}`;
+    
+    console.log('[Background] Starting Prompt API streaming...');
+    const stream = session.promptStreaming(fullPrompt);
+    
+    let fullSummary = '';
+    for await (const chunk of stream) {
+      if (signal && signal.aborted) {
+        console.log('[Background] Prompt API streaming aborted');
+        throw new DOMException('Aborted', 'AbortError');
+      }
+      
+      fullSummary += chunk;
+      
+      // Broadcast streaming update
+      broadcastStreamingUpdate(fullSummary);
+    }
+    
+    console.log('[Background] Prompt API streaming complete');
+    
+    if (session.destroy) {
+      session.destroy();
+    }
+    
+    return fullSummary;
+    
+  } catch (error) {
+    console.error('[Background] Prompt API failed:', error);
+    throw error;
+  }
+}
+
+// Broadcast streaming updates to all display surfaces
+function broadcastStreamingUpdate(partialSummary) {
+  const formatted = formatAISummary(partialSummary);
+  
+  // Send to side panel if open
+  chrome.runtime.sendMessage({
+    type: 'STREAMING_UPDATE',
+    content: formatted
+  }).catch(() => {
+    // Side panel not open, ignore
+  });
+  
+  // Send to content script for tooltip
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    if (tabs[0]) {
+      chrome.tabs.sendMessage(tabs[0].id, {
+        type: 'STREAMING_UPDATE',
+        content: formatted
+      }).catch(() => {
+        // Content script not ready, ignore
+      });
+    }
+  });
+}
+
+// Format AI summary to HTML
+function formatAISummary(text) {
+  if (!text) return '';
+  
+  let formatted = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  
+  formatted = formatted
+    .replace(/^### (.+)$/gm, '<h4>$1</h4>')
+    .replace(/^## (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^# (.+)$/gm, '<h2>$1</h2>');
+  
+  formatted = formatted
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/__(.+?)__/g, '<strong>$1</strong>');
+  
+  formatted = formatted
+    .replace(/\*([^\*\s][^\*]*?[^\*\s])\*/g, '<em>$1</em>')
+    .replace(/_([^_\s][^_]*?[^_\s])_/g, '<em>$1</em>');
+  
+  formatted = formatted
+    .replace(/^[\*\-•] (.+)$/gm, '<li>$1</li>');
+  
+  formatted = formatted
+    .replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+  
+  formatted = formatted
+    .replace(/(<li>.*?<\/li>\n?)+/g, (match) => {
+      return '<ul>' + match + '</ul>';
+    });
+  
+  formatted = formatted
+    .replace(/\n\n+/g, '</p><p>');
+  
+  formatted = formatted
+    .replace(/\n/g, '<br>');
+  
+  if (!formatted.startsWith('<h') && !formatted.startsWith('<ul') && !formatted.startsWith('<p>')) {
+    formatted = '<p>' + formatted;
+  }
+  if (!formatted.endsWith('</p>') && !formatted.endsWith('</ul>') && !formatted.endsWith('</h2>') && !formatted.endsWith('</h3>') && !formatted.endsWith('</h4>')) {
+    formatted = formatted + '</p>';
+  }
+  
+  formatted = formatted
+    .replace(/<p><\/p>/g, '')
+    .replace(/<p>\s*<\/p>/g, '');
+  
+  formatted = formatted
+    .replace(/<p>(<h\d>)/g, '$1')
+    .replace(/(<\/h\d>)<\/p>/g, '$1')
+    .replace(/<p>(<ul>)/g, '$1')
+    .replace(/(<\/ul>)<\/p>/g, '$1');
+  
+  return formatted;
+}
+
+// Handle content summarization
+async function handleSummarizeContent(message, sender) {
+  const { url, title, textContent, html } = message;
+  
+  console.log('[Background] Summarize request for:', url);
+  
+  // Check if same URL is already being processed
+  if (isProcessingSummary && lastProcessedUrl === url) {
+    console.log('[Background] Already processing this URL, ignoring duplicate');
+    return { status: 'duplicate' };
+  }
+  
+  // Cancel previous processing if different URL
+  if (currentAbortController && lastProcessedUrl !== url) {
+    console.log('[Background] Canceling previous processing for different URL');
+    currentAbortController.abort();
+    currentAbortController = null;
+    isProcessingSummary = false;
+  }
+  
+  // Check cache
+  const cacheKey = `${url}_${settings.apiChoice}_${settings.customPrompt}`;
+  const cached = summaryCache.get(cacheKey);
+  
+  if (cached && (Date.now() - cached.timestamp < CACHE_DURATION)) {
+    console.log('[Background] Returning cached summary');
+    return {
+      status: 'complete',
+      title: title,
+      summary: cached.summary,
+      cached: true
+    };
+  }
+  
+  // Start processing
+  currentAbortController = new AbortController();
+  const signal = currentAbortController.signal;
+  isProcessingSummary = true;
+  lastProcessedUrl = url;
+  
+  // Notify displays that processing started
+  broadcastProcessingStatus('started', title);
+  
+  try {
+    const summary = await summarizeContent(textContent, signal);
+    
+    // Check if aborted
+    if (signal.aborted) {
+      console.log('[Background] Processing was aborted');
+      return { status: 'aborted' };
+    }
+    
+    // Cache the result
+    summaryCache.set(cacheKey, {
+      summary: summary,
+      timestamp: Date.now()
+    });
+    
+    console.log('[Background] Summarization complete and cached');
+    
+    isProcessingSummary = false;
+    currentAbortController = null;
+    
+    return {
+      status: 'complete',
+      title: title,
+      summary: summary,
+      cached: false
+    };
+    
+  } catch (error) {
+    isProcessingSummary = false;
+    currentAbortController = null;
+    
+    if (error.name === 'AbortError') {
+      return { status: 'aborted' };
+    }
+    
+    console.error('[Background] Summarization error:', error);
+    return { status: 'error', error: error.message };
+  }
+}
+
+// Broadcast processing status
+function broadcastProcessingStatus(status, title) {
+  const message = {
+    type: 'PROCESSING_STATUS',
+    status: status,
+    title: title
+  };
+  
+  // To side panel
+  chrome.runtime.sendMessage(message).catch(() => {});
+  
+  // To content script
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    if (tabs[0]) {
+      chrome.tabs.sendMessage(tabs[0].id, message).catch(() => {});
+    }
+  });
+}
+
+// ========================================
+// MESSAGE HANDLERS
+// ========================================
+
 // Handle extension icon click to open side panel
 chrome.action.onClicked.addListener((tab) => {
   chrome.sidePanel.open({ windowId: tab.windowId });
 });
 
-// Cache for fetched HTML: { url: htmlString }
-const htmlCache = {};
-
-// Listen for messages from content script
+// Listen for messages
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  
+  // Handle content summarization request
+  if (message.type === 'SUMMARIZE_CONTENT') {
+    handleSummarizeContent(message, sender)
+      .then(result => sendResponse(result))
+      .catch(error => sendResponse({ error: error.message }));
+    return true;
+  }
+  
+  // Handle get API status
+  if (message.type === 'GET_API_STATUS') {
+    sendResponse({
+      summarizer: SummarizerAPI.summarizer.status,
+      promptAPI: SummarizerAPI.promptAPI.status
+    });
+    return true;
+  }
+  
+  // Handle get settings
+  if (message.type === 'GET_SETTINGS') {
+    sendResponse(settings);
+    return true;
+  }
+  
+  // Handle HTML fetch
   if (message.type === 'FETCH_CONTENT') {
     const url = message.url;
     

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Hover Link Preview",
-  "version": "1.0",
+  "version": "1.1",
   "description": "Preview article content by hovering over links",
   "permissions": [
     "sidePanel",
@@ -16,7 +16,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": ["lib/Readability.js", "content.js"],
       "run_at": "document_idle"
     }
   ],
@@ -25,5 +25,9 @@
   },
   "action": {
     "default_title": "Open Hover Preview Panel"
-  }
+  },
+  "web_accessible_resources": [{
+    "resources": ["lib/Readability.js"],
+    "matches": ["<all_urls>"]
+  }]
 }
