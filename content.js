@@ -6,10 +6,12 @@
   
   // State management
   let currentHoverTimeout = null;
+  let hideTimeout = null;
   let lastProcessedUrl = null;
   let tooltip = null;
   let displayMode = 'both';
   let currentHoveredElement = null;
+  let isMouseInTooltip = false;
   
   // Create tooltip
   function createTooltip() {
@@ -35,7 +37,22 @@
       pointer-events: auto;
       opacity: 0;
       transition: opacity 0.2s ease;
+      cursor: auto;
+      user-select: text;
     `;
+    
+    // Make tooltip interactive - prevent hiding when mouse enters
+    tooltip.addEventListener('mouseenter', () => {
+      isMouseInTooltip = true;
+      clearTimeout(hideTimeout);
+      hideTimeout = null;
+    });
+    
+    // Hide with delay when mouse leaves tooltip
+    tooltip.addEventListener('mouseleave', () => {
+      isMouseInTooltip = false;
+      scheduleHide(200); // Short delay when leaving tooltip
+    });
     
     document.body.appendChild(tooltip);
     return tooltip;
@@ -75,9 +92,23 @@
     tooltip.style.left = `${left}px`;
   }
   
+  // Schedule hiding tooltip with delay
+  function scheduleHide(delay = 300) {
+    clearTimeout(hideTimeout);
+    hideTimeout = setTimeout(() => {
+      if (!isMouseInTooltip) {
+        hideTooltip();
+      }
+    }, delay);
+  }
+  
   // Show tooltip
   function showTooltip(element, content) {
     if (displayMode === 'panel') return;
+    
+    // Cancel any pending hide
+    clearTimeout(hideTimeout);
+    hideTimeout = null;
     
     const tooltipEl = createTooltip();
     tooltipEl.innerHTML = content;
@@ -90,12 +121,12 @@
     });
   }
   
-  // Hide tooltip
+  // Hide tooltip immediately
   function hideTooltip() {
     if (tooltip) {
       tooltip.style.opacity = '0';
       setTimeout(() => {
-        if (tooltip) {
+        if (tooltip && !isMouseInTooltip) {
           tooltip.style.display = 'none';
         }
       }, 200);
@@ -141,16 +172,17 @@
   
   // Handle mouseout
   function handleMouseOut(e) {
+    const link = findLink(e.target);
+    if (!link) return;
+    
+    // Cancel pending hover
     clearTimeout(currentHoverTimeout);
     currentHoverTimeout = null;
     
-    // Hide tooltip after delay
-    setTimeout(() => {
-      if (!currentHoverTimeout) {
-        hideTooltip();
-        currentHoveredElement = null;
-      }
-    }, 300);
+    // Schedule hide with delay (unless mouse moves into tooltip)
+    scheduleHide(300);
+    
+    currentHoveredElement = null;
   }
   
   // Process link hover
