@@ -175,6 +175,19 @@
     const link = findLink(e.target);
     if (!link) return;
     
+    // Check if we're actually leaving the link (not just moving to a child element or tooltip)
+    const relatedTarget = e.relatedTarget;
+    if (relatedTarget) {
+      // Don't hide if moving to a child element
+      if (link.contains(relatedTarget) || link === relatedTarget) {
+        return;
+      }
+      // Don't hide if moving into the tooltip
+      if (tooltip && (tooltip.contains(relatedTarget) || tooltip === relatedTarget)) {
+        return;
+      }
+    }
+    
     // Cancel pending hover
     clearTimeout(currentHoverTimeout);
     currentHoverTimeout = null;
