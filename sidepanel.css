@@ -1,0 +1,383 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  line-height: 1.6;
+  color: #333;
+  background: #ffffff;
+}
+
+#container {
+  padding: 20px;
+  max-width: 100%;
+}
+
+.hidden {
+  display: none !important;
+}
+
+hr {
+  border: none;
+  border-top: 1px solid #e0e0e0;
+  margin: 20px 0;
+}
+
+/* Settings Section */
+#settings-section {
+  background: #f8f9fa;
+  padding: 16px;
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+
+#settings-section h3 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: #1a1a1a;
+}
+
+.radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.radio-group label {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.radio-group input[type="radio"] {
+  margin-right: 8px;
+  cursor: pointer;
+}
+
+#prompt-container {
+  margin-top: 12px;
+}
+
+#prompt-container label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 6px;
+  color: #555;
+}
+
+#custom-prompt {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 13px;
+  resize: vertical;
+}
+
+#custom-prompt:focus {
+  outline: none;
+  border-color: #3498db;
+}
+
+/* Welcome State */
+#welcome {
+  text-align: center;
+  padding: 40px 20px;
+  color: #666;
+  font-size: 15px;
+}
+
+/* Loading States */
+#loading-extract,
+#loading-summarize {
+  text-align: center;
+  padding: 40px 20px;
+}
+
+.spinner {
+  border: 3px solid #f3f3f3;
+  border-top: 3px solid #3498db;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  animation: spin 1s linear infinite;
+  margin: 0 auto 16px;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Content Area */
+#content-area {
+  animation: fadeIn 0.3s ease-in;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+#title {
+  font-size: 22px;
+  font-weight: 600;
+  margin-bottom: 20px;
+  color: #1a1a1a;
+  line-height: 1.3;
+}
+
+#summary-section h2,
+#full-content-section h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: #555;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+#ai-summary {
+  background: #e8f4f8;
+  padding: 16px;
+  border-radius: 8px;
+  border-left: 4px solid #3498db;
+  font-size: 15px;
+  line-height: 1.7;
+  margin-bottom: 16px;
+  color: #1a1a1a;
+}
+
+#ai-summary h2,
+#ai-summary h3,
+#ai-summary h4 {
+  font-weight: 600;
+  margin-top: 12px;
+  margin-bottom: 8px;
+  color: #2c5aa0;
+}
+
+#ai-summary h2 { font-size: 18px; }
+#ai-summary h3 { font-size: 16px; }
+#ai-summary h4 { font-size: 15px; }
+
+#ai-summary p {
+  margin-bottom: 12px;
+}
+
+#ai-summary p:last-child {
+  margin-bottom: 0;
+}
+
+#ai-summary ul {
+  margin: 12px 0;
+  padding-left: 24px;
+}
+
+#ai-summary li {
+  margin-bottom: 8px;
+  line-height: 1.6;
+}
+
+#ai-summary strong {
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+#ai-summary em {
+  font-style: italic;
+}
+
+#ai-summary br {
+  display: block;
+  content: "";
+  margin: 4px 0;
+}
+
+.toggle-btn {
+  width: 100%;
+  padding: 10px;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  color: #3498db;
+  transition: all 0.2s;
+  margin-bottom: 16px;
+}
+
+.toggle-btn:hover {
+  background: #f8f9fa;
+  border-color: #3498db;
+}
+
+#full-content-section {
+  margin-top: 16px;
+}
+
+#article-content,
+#fallback-article {
+  font-size: 15px;
+  line-height: 1.8;
+  color: #333;
+}
+
+#article-content p,
+#fallback-article p {
+  margin-bottom: 16px;
+}
+
+#article-content h1,
+#article-content h2,
+#article-content h3,
+#fallback-article h1,
+#fallback-article h2,
+#fallback-article h3 {
+  margin-top: 24px;
+  margin-bottom: 12px;
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+#article-content h1,
+#fallback-article h1 { font-size: 20px; }
+#article-content h2,
+#fallback-article h2 { font-size: 18px; }
+#article-content h3,
+#fallback-article h3 { font-size: 16px; }
+
+#article-content ul,
+#article-content ol,
+#fallback-article ul,
+#fallback-article ol {
+  margin-bottom: 16px;
+  padding-left: 24px;
+}
+
+#article-content li,
+#fallback-article li {
+  margin-bottom: 8px;
+}
+
+/* Error State */
+#error {
+  padding: 16px;
+  background: #fff3cd;
+  border-left: 4px solid #ffc107;
+  border-radius: 4px;
+  margin-bottom: 16px;
+}
+
+#error-message {
+  color: #856404;
+  font-size: 14px;
+  margin-bottom: 16px;
+}
+
+#fallback-content {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid #e0e0e0;
+}
+
+#fallback-content h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: #555;
+}
+
+#fallback-title {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 16px;
+  color: #1a1a1a;
+}
+
+/* Model Download State */
+#model-download {
+  text-align: center;
+  padding: 40px 20px;
+  animation: fadeIn 0.3s ease-in;
+}
+
+#model-download .icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+}
+
+#model-download h3 {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: #1a1a1a;
+}
+
+#model-download p {
+  font-size: 14px;
+  color: #666;
+  margin-bottom: 24px;
+  line-height: 1.6;
+}
+
+.btn {
+  padding: 12px 24px;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn.primary {
+  background: #3498db;
+  color: white;
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: #2980b9;
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.download-progress {
+  margin-top: 24px;
+  animation: fadeIn 0.3s ease-in;
+}
+
+.progress-bar {
+  width: 100%;
+  height: 8px;
+  background: #f0f0f0;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #3498db, #2ecc71);
+  width: 0%;
+  transition: width 0.3s ease;
+  border-radius: 4px;
+}
+
+.progress-text {
+  font-size: 13px;
+  color: #666;
+  margin: 0;
+}

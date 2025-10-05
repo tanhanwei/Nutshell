@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <div id="container">
+    <!-- Settings Section (Always visible at top) -->
+    <div id="settings-section">
+      <h3>AI Summarization</h3>
+      
+      <div class="radio-group">
+        <label>
+          <input type="radio" name="api-choice" value="summarization" id="radio-summarization" checked>
+          <span>Summarization API</span>
+        </label>
+        <label>
+          <input type="radio" name="api-choice" value="prompt" id="radio-prompt">
+          <span>Prompt API (Custom)</span>
+        </label>
+      </div>
+      
+      <div id="prompt-container" class="hidden">
+        <label for="custom-prompt">Custom Prompt:</label>
+        <textarea id="custom-prompt" rows="3" placeholder="Enter your summarization prompt...">Summarize this article in 2-3 sentences</textarea>
+      </div>
+    </div>
+    
+    <hr>
+    
+    <!-- Loading States -->
+    <div id="loading-extract" class="hidden">
+      <div class="spinner"></div>
+      <p>Extracting content...</p>
+    </div>
+    
+    <div id="loading-summarize" class="hidden">
+      <div class="spinner"></div>
+      <p>Generating summary...</p>
+    </div>
+    
+    <!-- Content Area -->
+    <div id="content-area" class="hidden">
+      <h1 id="title"></h1>
+      
+      <div id="summary-section">
+        <h2>AI Summary</h2>
+        <div id="ai-summary"></div>
+      </div>
+      
+      <button id="toggle-full-content" class="toggle-btn">View Full Content</button>
+      
+      <div id="full-content-section" class="hidden">
+        <h2>Full Content</h2>
+        <div id="article-content"></div>
+      </div>
+    </div>
+    
+    <!-- Error State -->
+    <div id="error" class="hidden">
+      <p id="error-message"></p>
+      <div id="fallback-content" class="hidden">
+        <h2>Full Content (Fallback)</h2>
+        <h1 id="fallback-title"></h1>
+        <div id="fallback-article"></div>
+      </div>
+    </div>
+    
+    <!-- Model Download State -->
+    <div id="model-download" class="card centered" hidden>
+      <div class="icon">🤖</div>
+      <h3 id="model-download-title">AI Model Required</h3>
+      <p id="model-download-message">The Prompt API model needs to be downloaded (2GB, one-time only)</p>
+      <button id="download-model-btn" class="btn primary">
+        Download Prompt API Model
+      </button>
+      <div class="download-progress" hidden>
+        <div class="progress-bar">
+          <div class="progress-fill"></div>
+        </div>
+        <p class="progress-text">Preparing download...</p>
+      </div>
+    </div>
+    
+    <!-- Welcome State -->
+    <div id="welcome">
+      <p>Hover over any link on a webpage to preview and summarize its content.</p>
+    </div>
+  </div>
+  
+  <script src="lib/Readability.js"></script>
+  <script src="sidepanel.js"></script>
+</body>
+</html>
