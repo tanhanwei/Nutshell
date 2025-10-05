@@ -249,6 +249,11 @@
     const url = link.href;
     const shortUrl = getShortUrl(url);
     
+    // Clear previous processing URL when starting a new one
+    if (currentlyProcessingUrl && currentlyProcessingUrl !== url) {
+      console.log(`🔄 SWITCHING: from "${getShortUrl(currentlyProcessingUrl)}" to "${shortUrl}"`);
+    }
+    
     // Mark this URL as currently being processed
     currentlyProcessingUrl = url;
     
@@ -310,54 +315,72 @@
       textContent: textContent
     });
     
+    // Check if this result is still for the current URL we care about
+    const isStillCurrent = (currentlyProcessingUrl === url);
+    
     if (result.status === 'duplicate') {
       console.log(`❌ DUPLICATE: "${shortUrl}" (ignoring)`);
-      currentlyProcessingUrl = null;
+      // Only clear if this was the current URL
+      if (isStillCurrent) {
+        currentlyProcessingUrl = null;
+      }
       return;
     }
     
     if (result.status === 'aborted') {
-      console.log(`❌ ABORTED: "${shortUrl}" (canceled by user)`);
-      currentlyProcessingUrl = null;
+      console.log(`❌ ABORTED: "${shortUrl}" (was canceled, ${isStillCurrent ? 'clearing' : 'already moved on'})`);
+      // Don't clear - user has likely already moved to a different URL
+      // The new URL's processing will have set currentlyProcessingUrl to the new value
       return;
     }
     
     if (result.status === 'error') {
       console.error(`❌ ERROR: "${shortUrl}" - ${result.error}`);
-      if (displayMode === 'tooltip' || displayMode === 'both') {
+      if (displayMode === 'tooltip' || displayMode === 'both' && isStillCurrent) {
         showTooltip(link, `<div style="padding:10px;background:#fee;border-radius:8px;">Error: ${result.error}</div>`);
       }
-      currentlyProcessingUrl = null;
+      // Only clear if this was the current URL
+      if (isStillCurrent) {
+        currentlyProcessingUrl = null;
+      }
       return;
     }
     
     // If complete and cached, display immediately (no streaming updates will come)
     if (result.status === 'complete' && result.cached) {
-      console.log(`💾 CACHED: "${shortUrl}" (instant display)`);
+      console.log(`💾 CACHED: "${shortUrl}" (instant display, still current: ${isStillCurrent})`);
       
-      // Format the summary
-      const formattedSummary = formatAISummary(result.summary);
-      
-      // Show in tooltip
-      if (displayMode === 'tooltip' || displayMode === 'both') {
-        showTooltip(link, formattedSummary);
+      // Only display if this is still the current URL
+      if (isStillCurrent) {
+        // Format the summary
+        const formattedSummary = formatAISummary(result.summary);
+        
+        // Show in tooltip
+        if (displayMode === 'tooltip' || displayMode === 'both') {
+          showTooltip(link, formattedSummary);
+        }
+        
+        // Send to sidepanel
+        if (displayMode === 'panel' || displayMode === 'both') {
+          chrome.runtime.sendMessage({
+            type: 'DISPLAY_CACHED_SUMMARY',
+            title: result.title,
+            summary: formattedSummary
+          }).catch(() => {});
+        }
+        
+        // Done processing this URL
+        currentlyProcessingUrl = null;
+        console.log(`✅ COMPLETE: "${shortUrl}" (ready for next hover)`);
+      } else {
+        console.log(`⚠️ STALE CACHED: "${shortUrl}" (user moved on, ignoring)`);
       }
-      
-      // Send to sidepanel
-      if (displayMode === 'panel' || displayMode === 'both') {
-        chrome.runtime.sendMessage({
-          type: 'DISPLAY_CACHED_SUMMARY',
-          title: result.title,
-          summary: formattedSummary
-        }).catch(() => {});
-      }
-      
-      // Done processing this URL
-      currentlyProcessingUrl = null;
-      console.log(`✅ COMPLETE: "${shortUrl}" (ready for next hover)`);
-    } else {
-      // Streaming result
+    } else if (isStillCurrent) {
+      // Streaming result - only log if still current
       console.log(`📡 STREAMING: "${shortUrl}" (will receive updates)`);
+    } else {
+      // Streaming result arrived but user has moved on
+      console.log(`⚠️ STALE STREAMING: "${shortUrl}" (user moved on, ignoring)`);
     }
     
     // If not cached, summary will arrive via STREAMING_UPDATE messages
@@ -367,7 +390,13 @@
   // Listen for messages from background
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'STREAMING_UPDATE') {
-      updateTooltipContent(message.content);
+      // Only update if this is for the URL we're currently processing
+      if (message.url === currentlyProcessingUrl) {
+        updateTooltipContent(message.content);
+      } else {
+        const shortUrl = getShortUrl(message.url);
+        console.log(`⚠️ STALE STREAM UPDATE: "${shortUrl}" (ignoring, current: "${currentlyProcessingUrl ? getShortUrl(currentlyProcessingUrl) : 'none'}")`);
+      }
     }
     
     if (message.type === 'PROCESSING_STATUS') {

@@ -134,15 +134,15 @@ setInterval(() => {
 // AI SUMMARIZATION FUNCTIONS
 // ========================================
 
-async function summarizeContent(text, signal) {
+async function summarizeContent(text, signal, url) {
   if (settings.apiChoice === 'summarization') {
-    return await useSummarizationAPI(text, signal);
+    return await useSummarizationAPI(text, signal, url);
   } else {
-    return await usePromptAPI(text, signal);
+    return await usePromptAPI(text, signal, url);
   }
 }
 
-async function useSummarizationAPI(text, signal) {
+async function useSummarizationAPI(text, signal, url) {
   if (!SummarizerAPI.summarizer.available) {
     throw new Error('Summarizer API not available');
   }
@@ -200,8 +200,8 @@ async function useSummarizationAPI(text, signal) {
       
       fullSummary += chunk;
       
-      // Broadcast streaming update to all listeners
-      broadcastStreamingUpdate(fullSummary);
+      // Broadcast streaming update to all listeners (with URL for filtering)
+      broadcastStreamingUpdate(fullSummary, url);
     }
     
     console.log('[Background] Summarizer streaming complete');
@@ -218,7 +218,7 @@ async function useSummarizationAPI(text, signal) {
   }
 }
 
-async function usePromptAPI(text, signal) {
+async function usePromptAPI(text, signal, url) {
   if (!SummarizerAPI.promptAPI.available) {
     throw new Error('Prompt API not available');
   }
@@ -274,8 +274,8 @@ async function usePromptAPI(text, signal) {
       
       fullSummary += chunk;
       
-      // Broadcast streaming update
-      broadcastStreamingUpdate(fullSummary);
+      // Broadcast streaming update (with URL for filtering)
+      broadcastStreamingUpdate(fullSummary, url);
     }
     
     console.log('[Background] Prompt API streaming complete');
@@ -293,13 +293,14 @@ async function usePromptAPI(text, signal) {
 }
 
 // Broadcast streaming updates to all display surfaces
-function broadcastStreamingUpdate(partialSummary) {
+function broadcastStreamingUpdate(partialSummary, url) {
   const formatted = formatAISummary(partialSummary);
   
   // Send to side panel if open
   chrome.runtime.sendMessage({
     type: 'STREAMING_UPDATE',
-    content: formatted
+    content: formatted,
+    url: url
   }).catch(() => {
     // Side panel not open, ignore
   });
@@ -309,7 +310,8 @@ function broadcastStreamingUpdate(partialSummary) {
     if (tabs[0]) {
       chrome.tabs.sendMessage(tabs[0].id, {
         type: 'STREAMING_UPDATE',
-        content: formatted
+        content: formatted,
+        url: url
       }).catch(() => {
         // Content script not ready, ignore
       });
@@ -420,7 +422,7 @@ async function handleSummarizeContent(message, sender) {
   broadcastProcessingStatus('started', title);
   
   try {
-    const summary = await summarizeContent(textContent, signal);
+    const summary = await summarizeContent(textContent, signal, url);
     
     // Check if aborted
     if (signal.aborted) {
