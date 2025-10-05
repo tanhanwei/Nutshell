@@ -192,6 +192,9 @@ async function useSummarizationAPI(text, signal, url) {
     const stream = summarizer.summarizeStreaming(processedText);
     
     let fullSummary = '';
+    let lastBroadcast = 0;
+    const BROADCAST_INTERVAL = 150; // Only broadcast every 150ms
+    
     for await (const chunk of stream) {
       if (signal && signal.aborted) {
         console.log('[Background] Summarizer streaming aborted');
@@ -200,9 +203,16 @@ async function useSummarizationAPI(text, signal, url) {
       
       fullSummary += chunk;
       
-      // Broadcast streaming update to all listeners (with URL for filtering)
-      broadcastStreamingUpdate(fullSummary, url);
+      // Throttle broadcasts to prevent flooding
+      const now = Date.now();
+      if (now - lastBroadcast >= BROADCAST_INTERVAL) {
+        broadcastStreamingUpdate(fullSummary, url);
+        lastBroadcast = now;
+      }
     }
+    
+    // Send final update
+    broadcastStreamingUpdate(fullSummary, url);
     
     console.log('[Background] Summarizer streaming complete');
     
@@ -266,6 +276,9 @@ async function usePromptAPI(text, signal, url) {
     const stream = session.promptStreaming(fullPrompt);
     
     let fullSummary = '';
+    let lastBroadcast = 0;
+    const BROADCAST_INTERVAL = 150; // Only broadcast every 150ms
+    
     for await (const chunk of stream) {
       if (signal && signal.aborted) {
         console.log('[Background] Prompt API streaming aborted');
@@ -274,9 +287,16 @@ async function usePromptAPI(text, signal, url) {
       
       fullSummary += chunk;
       
-      // Broadcast streaming update (with URL for filtering)
-      broadcastStreamingUpdate(fullSummary, url);
+      // Throttle broadcasts to prevent flooding
+      const now = Date.now();
+      if (now - lastBroadcast >= BROADCAST_INTERVAL) {
+        broadcastStreamingUpdate(fullSummary, url);
+        lastBroadcast = now;
+      }
     }
+    
+    // Send final update
+    broadcastStreamingUpdate(fullSummary, url);
     
     console.log('[Background] Prompt API streaming complete');
     
