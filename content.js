@@ -158,17 +158,48 @@
     return null;
   }
   
+  // Get link type for debugging
+  function getLinkType(link, target) {
+    // Check if the immediate target or any child is an image
+    const hasImage = link.querySelector('img') !== null;
+    const targetIsImage = target.tagName === 'IMG';
+    
+    if (targetIsImage || hasImage) {
+      return '🖼️ IMAGE-LINK';
+    }
+    return '📝 TEXT-LINK';
+  }
+  
+  // Get short URL for logging
+  function getShortUrl(url) {
+    try {
+      const urlObj = new URL(url);
+      const path = urlObj.pathname;
+      // Get last 2 segments of path or domain
+      const segments = path.split('/').filter(s => s);
+      const lastSegments = segments.slice(-2).join('/');
+      return lastSegments || urlObj.hostname;
+    } catch {
+      return url.substring(0, 50);
+    }
+  }
+  
   // Handle mouseover
   function handleMouseOver(e) {
     const link = findLink(e.target);
     if (!link) return;
     
     const url = link.href;
+    const linkType = getLinkType(link, e.target);
+    const shortUrl = getShortUrl(url);
     
     // Don't re-trigger if we're already processing this exact URL
     if (currentlyProcessingUrl === url) {
+      console.log(`🚫 BLOCKED: ${linkType} "${shortUrl}" (already processing)`);
       return;
     }
+    
+    console.log(`✅ HOVER: ${linkType} "${shortUrl}" (will trigger in ${HOVER_DELAY}ms)`);
     
     currentHoveredElement = link;
     
@@ -183,18 +214,25 @@
     const link = findLink(e.target);
     if (!link) return;
     
+    const url = link.href;
+    const shortUrl = getShortUrl(url);
+    
     // Check if we're actually leaving the link (not just moving to a child element or tooltip)
     const relatedTarget = e.relatedTarget;
     if (relatedTarget) {
       // Don't hide if moving to a child element
       if (link.contains(relatedTarget) || link === relatedTarget) {
+        console.log(`⏭️ MOUSEOUT: "${shortUrl}" (child element, ignored)`);
         return;
       }
       // Don't hide if moving into the tooltip
       if (tooltip && (tooltip.contains(relatedTarget) || tooltip === relatedTarget)) {
+        console.log(`⏭️ MOUSEOUT: "${shortUrl}" (into tooltip, ignored)`);
         return;
       }
     }
+    
+    console.log(`👋 MOUSEOUT: "${shortUrl}" (scheduling hide in 300ms)`);
     
     // Cancel pending hover
     clearTimeout(currentHoverTimeout);
@@ -209,11 +247,12 @@
   // Process link hover
   async function processLinkHover(link) {
     const url = link.href;
+    const shortUrl = getShortUrl(url);
     
     // Mark this URL as currently being processed
     currentlyProcessingUrl = url;
     
-    console.log('[Content] Processing hover for:', url);
+    console.log(`🔄 PROCESSING: "${shortUrl}"`);
     
     // Show loading state in tooltip
     if (displayMode === 'tooltip' || displayMode === 'both') {
@@ -272,19 +311,19 @@
     });
     
     if (result.status === 'duplicate') {
-      console.log('[Content] Duplicate request, ignoring');
+      console.log(`❌ DUPLICATE: "${shortUrl}" (ignoring)`);
       currentlyProcessingUrl = null;
       return;
     }
     
     if (result.status === 'aborted') {
-      console.log('[Content] Request was aborted');
+      console.log(`❌ ABORTED: "${shortUrl}" (canceled by user)`);
       currentlyProcessingUrl = null;
       return;
     }
     
     if (result.status === 'error') {
-      console.error('[Content] Summarization error:', result.error);
+      console.error(`❌ ERROR: "${shortUrl}" - ${result.error}`);
       if (displayMode === 'tooltip' || displayMode === 'both') {
         showTooltip(link, `<div style="padding:10px;background:#fee;border-radius:8px;">Error: ${result.error}</div>`);
       }
@@ -294,7 +333,7 @@
     
     // If complete and cached, display immediately (no streaming updates will come)
     if (result.status === 'complete' && result.cached) {
-      console.log('[Content] Displaying cached summary immediately');
+      console.log(`💾 CACHED: "${shortUrl}" (instant display)`);
       
       // Format the summary
       const formattedSummary = formatAISummary(result.summary);
@@ -315,6 +354,10 @@
       
       // Done processing this URL
       currentlyProcessingUrl = null;
+      console.log(`✅ COMPLETE: "${shortUrl}" (ready for next hover)`);
+    } else {
+      // Streaming result
+      console.log(`📡 STREAMING: "${shortUrl}" (will receive updates)`);
     }
     
     // If not cached, summary will arrive via STREAMING_UPDATE messages
