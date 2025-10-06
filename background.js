@@ -369,7 +369,8 @@ function formatAISummary(text) {
   
   formatted = formatted
     .replace(/(<li>.*?<\/li>\n?)+/g, (match) => {
-      return '<ul>' + match + '</ul>';
+      // Remove newlines from inside the list before wrapping
+      return '<ul>' + match.replace(/\n/g, '') + '</ul>';
     });
   
   formatted = formatted
