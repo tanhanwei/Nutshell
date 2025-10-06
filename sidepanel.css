@@ -221,11 +221,14 @@ hr {
 #ai-summary ul {
   margin: 12px 0;
   padding-left: 24px;
+  list-style-type: disc;
+  list-style-position: outside;
 }
 
 #ai-summary li {
   margin-bottom: 8px;
   line-height: 1.6;
+  display: list-item;
 }
 
 #ai-summary strong {

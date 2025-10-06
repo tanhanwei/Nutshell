@@ -21,6 +21,32 @@
   function createTooltip() {
     if (tooltip) return tooltip;
     
+    // Inject CSS for tooltip list styling
+    if (!document.getElementById('hover-tooltip-styles')) {
+      const style = document.createElement('style');
+      style.id = 'hover-tooltip-styles';
+      style.textContent = `
+        #hover-summary-tooltip ul {
+          margin: 12px 0;
+          padding-left: 24px;
+          list-style-type: disc;
+          list-style-position: outside;
+        }
+        #hover-summary-tooltip li {
+          margin-bottom: 8px;
+          line-height: 1.6;
+          display: list-item;
+        }
+        #hover-summary-tooltip strong {
+          font-weight: 600;
+        }
+        #hover-summary-tooltip em {
+          font-style: italic;
+        }
+      `;
+      document.head.appendChild(style);
+    }
+    
     tooltip = document.createElement('div');
     tooltip.id = 'hover-summary-tooltip';
     tooltip.style.cssText = `
