@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouTube Caption Extraction - Test Page</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      padding: 20px;
+      min-height: 100vh;
+    }
+    
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+      overflow: hidden;
+    }
+    
+    header {
+      background: #667eea;
+      color: white;
+      padding: 24px;
+      text-align: center;
+    }
+    
+    h1 {
+      font-size: 28px;
+      margin-bottom: 8px;
+    }
+    
+    .subtitle {
+      opacity: 0.9;
+      font-size: 14px;
+    }
+    
+    main {
+      padding: 24px;
+    }
+    
+    .section {
+      background: #f8f9fa;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    
+    .section-title {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      color: #333;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    
+    .input-group {
+      margin-bottom: 16px;
+    }
+    
+    label {
+      display: block;
+      font-size: 14px;
+      font-weight: 500;
+      margin-bottom: 8px;
+      color: #555;
+    }
+    
+    input[type="text"] {
+      width: 100%;
+      padding: 12px;
+      border: 2px solid #e0e0e0;
+      border-radius: 6px;
+      font-size: 14px;
+      transition: border-color 0.2s;
+    }
+    
+    input[type="text"]:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+    
+    .button-group {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    
+    button {
+      padding: 12px 24px;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      flex: 1;
+      min-width: 150px;
+    }
+    
+    button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    }
+    
+    button:active {
+      transform: translateY(0);
+    }
+    
+    .btn-primary {
+      background: #667eea;
+      color: white;
+    }
+    
+    .btn-secondary {
+      background: #4ECDC4;
+      color: white;
+    }
+    
+    .btn-warning {
+      background: #FFA502;
+      color: white;
+    }
+    
+    .btn-danger {
+      background: #f44336;
+      color: white;
+    }
+    
+    .btn-success {
+      background: #4CAF50;
+      color: white;
+    }
+    
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+    
+    .stat-card {
+      background: white;
+      border-radius: 8px;
+      padding: 16px;
+      text-align: center;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    
+    .stat-label {
+      font-size: 12px;
+      color: #999;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    
+    .stat-value {
+      font-size: 24px;
+      font-weight: bold;
+      color: #333;
+    }
+    
+    .stat-rate {
+      font-size: 14px;
+      color: #667eea;
+      margin-top: 4px;
+    }
+    
+    .results {
+      background: #1e1e1e;
+      color: #0f0;
+      padding: 16px;
+      border-radius: 6px;
+      max-height: 400px;
+      overflow-y: auto;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+    
+    .results:empty::before {
+      content: 'Test results will appear here...';
+      color: #666;
+    }
+    
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      margin-top: 12px;
+    }
+    
+    .status.success {
+      background: #e8f5e9;
+      color: #2e7d32;
+    }
+    
+    .status.error {
+      background: #ffebee;
+      color: #c62828;
+    }
+    
+    .status.pending {
+      background: #fff3e0;
+      color: #f57c00;
+    }
+    
+    .status-indicator {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+    
+    .status.success .status-indicator {
+      background: #4CAF50;
+    }
+    
+    .status.error .status-indicator {
+      background: #f44336;
+    }
+    
+    .status.pending .status-indicator {
+      background: #FFA502;
+    }
+    
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    
+    .test-videos {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    
+    .test-video {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      background: white;
+      border-radius: 6px;
+      border: 2px solid #e0e0e0;
+    }
+    
+    .test-video input[type="radio"] {
+      width: 18px;
+      height: 18px;
+      cursor: pointer;
+    }
+    
+    .video-info {
+      flex: 1;
+    }
+    
+    .video-id {
+      font-weight: 600;
+      color: #333;
+    }
+    
+    .video-desc {
+      font-size: 12px;
+      color: #999;
+      margin-top: 2px;
+    }
+    
+    .console-output {
+      background: #1e1e1e;
+      color: #fff;
+      padding: 16px;
+      border-radius: 6px;
+      max-height: 500px;
+      overflow-y: auto;
+      font-family: 'Courier New', monospace;
+      font-size: 11px;
+    }
+    
+    .console-entry {
+      margin-bottom: 4px;
+      padding: 4px 0;
+      border-bottom: 1px solid #333;
+    }
+    
+    .console-timestamp {
+      color: #666;
+      font-size: 10px;
+    }
+    
+    .controls {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    
+    .checkbox-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px;
+      background: white;
+      border-radius: 6px;
+    }
+    
+    .checkbox-group input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      cursor: pointer;
+    }
+    
+    .checkbox-group label {
+      margin: 0;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    
+    ::-webkit-scrollbar-track {
+      background: #f1f1f1;
+      border-radius: 4px;
+    }
+    
+    ::-webkit-scrollbar-thumb {
+      background: #888;
+      border-radius: 4px;
+    }
+    
+    ::-webkit-scrollbar-thumb:hover {
+      background: #555;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🧪 YouTube Caption Extraction Tester</h1>
+      <p class="subtitle">Test and compare different caption extraction methods</p>
+    </header>
+    
+    <main>
+      <!-- Statistics Section -->
+      <div class="section">
+        <div class="section-title">📊 Statistics</div>
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-label">Method 1 (webRequest)</div>
+            <div class="stat-value" id="stat-method1-attempts">0</div>
+            <div class="stat-rate" id="stat-method1-rate">N/A</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Method 4 (Intercept)</div>
+            <div class="stat-value" id="stat-method4-attempts">0</div>
+            <div class="stat-rate" id="stat-method4-rate">N/A</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Direct API</div>
+            <div class="stat-value" id="stat-api-attempts">0</div>
+            <div class="stat-rate" id="stat-api-rate">N/A</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Total Tests</div>
+            <div class="stat-value" id="stat-total">0</div>
+            <div class="stat-rate" id="stat-success-rate">0% success</div>
+          </div>
+        </div>
+        <button class="btn-warning" onclick="resetStats()">🔄 Reset Statistics</button>
+      </div>
+      
+      <!-- Test Videos Section -->
+      <div class="section">
+        <div class="section-title">🎬 Test Videos</div>
+        <div class="test-videos" id="test-videos">
+          <div class="test-video">
+            <input type="radio" name="test-video" value="dQw4w9WgXcQ" id="vid1" checked>
+            <label for="vid1" class="video-info">
+              <div class="video-id">dQw4w9WgXcQ</div>
+              <div class="video-desc">Rick Astley - Never Gonna Give You Up (popular, has captions)</div>
+            </label>
+          </div>
+          <div class="test-video">
+            <input type="radio" name="test-video" value="jNQXAC9IVRw" id="vid2">
+            <label for="vid2" class="video-info">
+              <div class="video-id">jNQXAC9IVRw</div>
+              <div class="video-desc">Me at the zoo (first YouTube video, has captions)</div>
+            </label>
+          </div>
+          <div class="test-video">
+            <input type="radio" name="test-video" value="9bZkp7q19f0" id="vid3">
+            <label for="vid3" class="video-info">
+              <div class="video-id">9bZkp7q19f0</div>
+              <div class="video-desc">PSY - Gangnam Style (billions of views, has captions)</div>
+            </label>
+          </div>
+        </div>
+        <div class="input-group" style="margin-top: 16px;">
+          <label for="custom-video-id">Or enter custom video ID or URL:</label>
+          <input type="text" id="custom-video-id" placeholder="e.g., dQw4w9WgXcQ or https://youtube.com/watch?v=...">
+        </div>
+      </div>
+      
+      <!-- Direct API Test -->
+      <div class="section">
+        <div class="section-title">🔗 Test Direct API</div>
+        <p style="margin-bottom: 16px; font-size: 14px; color: #666;">
+          Directly fetch captions from YouTube's timedtext API. This method works anywhere.
+        </p>
+        <div class="button-group">
+          <button class="btn-primary" onclick="testDirectAPI()">▶️ Test Direct API</button>
+          <button class="btn-secondary" onclick="testDirectAPIAllVideos()">▶️▶️ Test All Videos</button>
+        </div>
+        <div id="direct-api-status"></div>
+      </div>
+      
+      <!-- Method 4 Test -->
+      <div class="section">
+        <div class="section-title">4️⃣ Test Method 4 (Network Intercept)</div>
+        <p style="margin-bottom: 16px; font-size: 14px; color: #666;">
+          Intercept fetch() and XMLHttpRequest. Requires visiting YouTube.com and hovering thumbnails.
+        </p>
+        <div class="button-group">
+          <button class="btn-primary" onclick="setupMethod4()" id="method4-setup-btn">🔧 Setup Intercept</button>
+          <button class="btn-danger" onclick="cleanupMethod4()" id="method4-cleanup-btn" disabled>🔌 Remove Intercept</button>
+        </div>
+        <div id="method4-status"></div>
+        <p style="margin-top: 12px; font-size: 13px; color: #999;">
+          After setup, open <a href="https://www.youtube.com" target="_blank" style="color: #667eea;">YouTube.com</a> 
+          and hover over video thumbnails. Captions will be captured automatically.
+        </p>
+      </div>
+      
+      <!-- Console Output -->
+      <div class="section">
+        <div class="section-title">🖥️ Console Output</div>
+        <div class="controls">
+          <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+            <div class="checkbox-group">
+              <input type="checkbox" id="auto-scroll" checked>
+              <label for="auto-scroll">Auto-scroll</label>
+            </div>
+            <div class="checkbox-group">
+              <input type="checkbox" id="show-data" checked>
+              <label for="show-data">Show data</label>
+            </div>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn-secondary" onclick="exportLogs()" style="min-width: auto; padding: 8px 16px;">💾 Export</button>
+            <button class="btn-danger" onclick="clearConsole()" style="min-width: auto; padding: 8px 16px;">🗑️ Clear</button>
+          </div>
+        </div>
+        <div class="console-output" id="console-output"></div>
+      </div>
+      
+      <!-- Results Section -->
+      <div class="section">
+        <div class="section-title">📝 Latest Results</div>
+        <div class="results" id="results"></div>
+      </div>
+    </main>
+  </div>
+  
+  <!-- Load scripts -->
+  <script src="../utils/debug-logger.js"></script>
+  <script src="../youtube/youtube-methods.js"></script>
+  <script>
+    // Test page controller
+    let method4Cleanup = null;
+    let testsRun = 0;
+    let testsSucceeded = 0;
+    
+    // Get selected video ID
+    function getSelectedVideoId() {
+      const custom = document.getElementById('custom-video-id').value.trim();
+      if (custom) {
+        // Try to extract video ID if it's a URL
+        const extracted = YouTubeMethods.extractVideoId(custom);
+        return extracted || custom;
+      }
+      
+      const selected = document.querySelector('input[name="test-video"]:checked');
+      return selected ? selected.value : null;
+    }
+    
+    // Update statistics display
+    function updateStats() {
+      const stats = window.YouTubeDebugLogger.getStats();
+      
+      // Method 1
+      document.getElementById('stat-method1-attempts').textContent = 
+        `${stats.method1.successes}/${stats.method1.attempts}`;
+      document.getElementById('stat-method1-rate').textContent = stats.method1SuccessRate;
+      
+      // Method 4
+      document.getElementById('stat-method4-attempts').textContent = 
+        `${stats.method4.successes}/${stats.method4.attempts}`;
+      document.getElementById('stat-method4-rate').textContent = stats.method4SuccessRate;
+      
+      // Direct API
+      document.getElementById('stat-api-attempts').textContent = 
+        `${stats.directAPI.successes}/${stats.directAPI.attempts}`;
+      document.getElementById('stat-api-rate').textContent = stats.directAPISuccessRate;
+      
+      // Total
+      const totalAttempts = stats.method1.attempts + stats.method4.attempts + stats.directAPI.attempts;
+      const totalSuccesses = stats.method1.successes + stats.method4.successes + stats.directAPI.successes;
+      document.getElementById('stat-total').textContent = `${totalSuccesses}/${totalAttempts}`;
+      
+      const successRate = totalAttempts > 0 
+        ? ((totalSuccesses / totalAttempts) * 100).toFixed(1) + '%' 
+        : '0%';
+      document.getElementById('stat-success-rate').textContent = successRate + ' success';
+    }
+    
+    // Reset statistics
+    function resetStats() {
+      if (confirm('Reset all statistics?')) {
+        window.YouTubeDebugLogger.resetStats();
+        testsRun = 0;
+        testsSucceeded = 0;
+        updateStats();
+      }
+    }
+    
+    // Add to console
+    function addToConsole(message, color = '#fff') {
+      const console = document.getElementById('console-output');
+      const entry = document.createElement('div');
+      entry.className = 'console-entry';
+      entry.innerHTML = `
+        <span class="console-timestamp">${new Date().toLocaleTimeString()}</span>
+        <span style="color: ${color}"> ${message}</span>
+      `;
+      console.appendChild(entry);
+      
+      if (document.getElementById('auto-scroll').checked) {
+        console.scrollTop = console.scrollHeight;
+      }
+    }
+    
+    // Clear console
+    function clearConsole() {
+      document.getElementById('console-output').innerHTML = '';
+      addToConsole('Console cleared', '#999');
+    }
+    
+    // Show results
+    function showResults(data) {
+      const results = document.getElementById('results');
+      const showData = document.getElementById('show-data').checked;
+      
+      if (showData) {
+        results.textContent = JSON.stringify(data, null, 2);
+      } else {
+        results.textContent = `Success: ${data.success}\nMethod: ${data.method}\nCaptions: ${data.captions?.length || 0}`;
+      }
+    }
+    
+    // Show status
+    function showStatus(elementId, message, type = 'pending') {
+      const element = document.getElementById(elementId);
+      element.innerHTML = `
+        <div class="status ${type}">
+          <div class="status-indicator"></div>
+          ${message}
+        </div>
+      `;
+    }
+    
+    // Test Direct API
+    async function testDirectAPI() {
+      const videoId = getSelectedVideoId();
+      if (!videoId) {
+        alert('Please select or enter a video ID');
+        return;
+      }
+      
+      showStatus('direct-api-status', `Testing video ${videoId}...`, 'pending');
+      addToConsole(`Testing Direct API for ${videoId}...`, '#45B7D1');
+      
+      try {
+        const result = await YouTubeMethods.fetchCaptionsDirect(videoId);
+        
+        if (result.success) {
+          showStatus('direct-api-status', 
+            `✅ Success! Captured ${result.captions.length} captions`, 'success');
+          addToConsole(`✅ Direct API success: ${result.captions.length} captions`, '#4CAF50');
+          testsSucceeded++;
+        } else {
+          showStatus('direct-api-status', `❌ Failed: ${result.error}`, 'error');
+          addToConsole(`❌ Direct API failed: ${result.error}`, '#f44336');
+        }
+        
+        testsRun++;
+        showResults(result);
+        updateStats();
+      } catch (error) {
+        showStatus('direct-api-status', `❌ Error: ${error.message}`, 'error');
+        addToConsole(`❌ Error: ${error.message}`, '#f44336');
+        testsRun++;
+        updateStats();
+      }
+    }
+    
+    // Test all videos
+    async function testDirectAPIAllVideos() {
+      const videos = ['dQw4w9WgXcQ', 'jNQXAC9IVRw', '9bZkp7q19f0'];
+      
+      showStatus('direct-api-status', `Testing ${videos.length} videos...`, 'pending');
+      addToConsole(`Testing all ${videos.length} videos...`, '#45B7D1');
+      
+      let successCount = 0;
+      
+      for (const videoId of videos) {
+        try {
+          const result = await YouTubeMethods.fetchCaptionsDirect(videoId);
+          if (result.success) {
+            successCount++;
+            addToConsole(`✅ ${videoId}: ${result.captions.length} captions`, '#4CAF50');
+          } else {
+            addToConsole(`❌ ${videoId}: ${result.error}`, '#f44336');
+          }
+          testsRun++;
+        } catch (error) {
+          addToConsole(`❌ ${videoId}: ${error.message}`, '#f44336');
+          testsRun++;
+        }
+        
+        // Small delay between requests
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      
+      testsSucceeded += successCount;
+      showStatus('direct-api-status', 
+        `Completed: ${successCount}/${videos.length} successful`, 
+        successCount === videos.length ? 'success' : 'error');
+      
+      updateStats();
+    }
+    
+    // Setup Method 4
+    function setupMethod4() {
+      if (method4Cleanup) {
+        alert('Method 4 is already active');
+        return;
+      }
+      
+      method4Cleanup = YouTubeMethods.setupNetworkIntercept();
+      
+      document.getElementById('method4-setup-btn').disabled = true;
+      document.getElementById('method4-cleanup-btn').disabled = false;
+      
+      showStatus('method4-status', '✅ Network intercept active. Visit YouTube.com and hover thumbnails.', 'success');
+      addToConsole('🔧 Method 4 network intercept activated', '#4ECDC4');
+      
+      // Listen for captured captions
+      window.addEventListener('youtube-captions-captured', (event) => {
+        const { videoId, captions, method } = event.detail;
+        addToConsole(`✅ Method 4 captured: ${videoId} (${captions.length} captions)`, '#4CAF50');
+        testsRun++;
+        testsSucceeded++;
+        showResults(event.detail);
+        updateStats();
+      });
+    }
+    
+    // Cleanup Method 4
+    function cleanupMethod4() {
+      if (!method4Cleanup) {
+        alert('Method 4 is not active');
+        return;
+      }
+      
+      const capturedData = method4Cleanup();
+      method4Cleanup = null;
+      
+      document.getElementById('method4-setup-btn').disabled = false;
+      document.getElementById('method4-cleanup-btn').disabled = true;
+      
+      showStatus('method4-status', `🔌 Intercept removed. Captured ${capturedData.size} videos.`, 'success');
+      addToConsole(`🔌 Method 4 removed. Captured ${capturedData.size} videos.`, '#4ECDC4');
+    }
+    
+    // Export logs
+    function exportLogs() {
+      window.YouTubeDebugLogger.downloadLogs('json');
+      addToConsole('💾 Logs exported', '#96CEB4');
+    }
+    
+    // Initialize
+    document.addEventListener('DOMContentLoaded', () => {
+      addToConsole('🧪 YouTube Caption Extraction Tester ready', '#A29BFE');
+      addToConsole('Select a video and click "Test Direct API" to start', '#999');
+      updateStats();
+    });
+  </script>
+</body>
+</html>
+
