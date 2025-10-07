@@ -466,7 +466,7 @@
             </div>
           </div>
           <div style="display: flex; gap: 8px;">
-            <button class="btn-secondary" onclick="exportLogs()" style="min-width: auto; padding: 8px 16px;">💾 Export</button>
+            <button class="btn-secondary" onclick="exportTestLogs()" style="min-width: auto; padding: 8px 16px;">💾 Export</button>
             <button class="btn-danger" onclick="clearConsole()" style="min-width: auto; padding: 8px 16px;">🗑️ Clear</button>
           </div>
         </div>
@@ -702,8 +702,8 @@
       addToConsole(`🔌 Method 4 removed. Captured ${capturedData.size} videos.`, '#4ECDC4');
     }
     
-    // Export logs
-    function exportLogs() {
+    // Export logs (renamed to avoid conflict with debug-logger.js)
+    function exportTestLogs() {
       window.YouTubeDebugLogger.downloadLogs('json');
       addToConsole('💾 Logs exported', '#96CEB4');
     }
