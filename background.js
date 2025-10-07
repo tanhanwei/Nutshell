@@ -564,4 +564,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     
     return true; // Keep channel open for async response
   }
+  
+  // Handle YouTube caption fetch (for testing and production)
+  if (message.action === 'FETCH_YOUTUBE_CAPTIONS') {
+    const url = message.url;
+    
+    console.log('[Background] Fetching YouTube captions:', url);
+    
+    fetch(url)
+      .then(response => {
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        return response.text();
+      })
+      .then(data => {
+        console.log('[Background] Successfully fetched captions, length:', data.length);
+        sendResponse({ success: true, data: data });
+      })
+      .catch(error => {
+        console.error('[Background] Failed to fetch captions:', error);
+        sendResponse({ success: false, error: error.message });
+      });
+    
+    return true; // Keep channel open for async response
+  }
 });
