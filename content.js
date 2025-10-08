@@ -28,6 +28,7 @@
   // YouTube-specific state
   let currentYouTubeOverlay = null; // Track active YouTube overlay
   let currentYouTubeOverlayUrl = null; // Track which URL the YouTube overlay is for
+  let overlayCreatedTime = 0; // Track when overlay was created (to prevent immediate mouseout)
   
   // Create tooltip
   function createTooltip() {
@@ -406,9 +407,14 @@
         hoverTimeouts.delete(url);
       }
       
-      // Note: With pointer-events: none on overlay, mouseout fires when leaving thumbnail
-      // even if mouse is still over the overlay content area (which has pointer-events: auto)
-      // This is actually what we want - allows hovering other thumbnails!
+      // CRITICAL: With pointer-events: none on overlay, the browser fires mouseout
+      // immediately when overlay appears (thinks mouse left thumbnail).
+      // Ignore mouseouts that happen within 500ms of overlay creation!
+      const timeSinceOverlayCreated = Date.now() - overlayCreatedTime;
+      if (timeSinceOverlayCreated < 500 && currentYouTubeOverlay) {
+        console.log('[YouTube] Ignoring mouseout (overlay just created', timeSinceOverlayCreated, 'ms ago)');
+        return;
+      }
       
       // Remove overlay if this thumbnail currently has it displayed
       // Check BOTH currentlyProcessingUrl (for in-progress) AND currentYouTubeOverlayUrl (for completed)
@@ -872,6 +878,7 @@
       
       currentYouTubeOverlay = null;
       currentYouTubeOverlayUrl = null;
+      overlayCreatedTime = 0; // Reset timestamp
     }
     
     // Also forcefully remove any stray overlays that might still be in the DOM
@@ -985,6 +992,7 @@
     // Create YouTube overlay (pass the thumbnail container)
     currentYouTubeOverlay = createYouTubeOverlay(thumbnailElement);
     currentYouTubeOverlayUrl = url; // Track which URL this overlay is for
+    overlayCreatedTime = Date.now(); // Track creation time to prevent immediate mouseout
     
     if (!currentYouTubeOverlay) {
       console.warn('[YouTube] Failed to create overlay, falling back to tooltip');
