@@ -284,6 +284,26 @@
     if (IS_YOUTUBE && isYouTubeThumbnail(e.target)) {
       console.log(`🎬 YOUTUBE THUMBNAIL: "${shortUrl}" (will trigger in ${HOVER_DELAY}ms)`);
       
+      // Find the thumbnail container element
+      const thumbnailSelectors = [
+        'ytd-thumbnail',
+        'ytd-rich-item-renderer',
+        'ytd-compact-video-renderer',
+        'ytd-video-preview',
+        'ytd-playlist-thumbnail'
+      ];
+      
+      let thumbnailElement = null;
+      for (const selector of thumbnailSelectors) {
+        thumbnailElement = e.target.closest(selector);
+        if (thumbnailElement) break;
+      }
+      
+      if (!thumbnailElement) {
+        console.warn('[YouTube] Could not find thumbnail element, skipping');
+        return;
+      }
+      
       // Cancel any previous hover/hide
       clearTimeout(currentHoverTimeout);
       if (hideTimeout) {
@@ -295,7 +315,7 @@
       currentlyProcessingUrl = url; // Mark as processing
       
       currentHoverTimeout = setTimeout(() => {
-        handleYouTubeThumbnailHover(link, url);
+        handleYouTubeThumbnailHover(thumbnailElement, link, url);
       }, HOVER_DELAY);
       
       return; // Don't process as regular link
@@ -665,13 +685,11 @@
    * Create YouTube summary overlay inside thumbnail
    */
   function createYouTubeOverlay(thumbnailElement) {
-    // Find the thumbnail container
-    const container = thumbnailElement.closest('ytd-thumbnail') || 
-                     thumbnailElement.closest('ytd-rich-item-renderer') ||
-                     thumbnailElement.closest('ytd-compact-video-renderer');
+    // thumbnailElement is already the container (ytd-thumbnail, ytd-rich-item-renderer, etc.)
+    const container = thumbnailElement;
     
     if (!container) {
-      console.warn('[YouTube] Could not find thumbnail container');
+      console.warn('[YouTube] No container provided');
       return null;
     }
     
@@ -837,7 +855,7 @@
   /**
    * Handle YouTube thumbnail hover - extract video ID and request caption summary
    */
-  async function handleYouTubeThumbnailHover(linkElement, url) {
+  async function handleYouTubeThumbnailHover(thumbnailElement, linkElement, url) {
     console.log('[YouTube] Thumbnail hover detected:', url);
     
     // Extract video ID
@@ -853,8 +871,8 @@
     // Store element for positioning
     processingElement = linkElement;
     
-    // Create YouTube overlay (instead of tooltip)
-    currentYouTubeOverlay = createYouTubeOverlay(linkElement);
+    // Create YouTube overlay (pass the thumbnail container)
+    currentYouTubeOverlay = createYouTubeOverlay(thumbnailElement);
     
     if (!currentYouTubeOverlay) {
       console.warn('[YouTube] Failed to create overlay, falling back to tooltip');
