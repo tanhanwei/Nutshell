@@ -310,25 +310,30 @@
         return;
       }
       
-      // CRITICAL: Cancel old processing BEFORE starting new one
+    // CRITICAL: Cancel old processing BEFORE starting new one
+    
+    // 1. ALWAYS clear currentlyProcessingUrl when switching videos
+    // This prevents streaming updates from old video bleeding into new overlay
+    if (currentlyProcessingUrl && currentlyProcessingUrl !== url) {
+      console.log(`[YouTube] ⛔ CANCELING processing for: ${currentlyProcessingUrl}`);
+      console.log(`[YouTube] ✅ Starting new processing for: ${url}`);
+      currentlyProcessingUrl = null;
       
-      // 1. ALWAYS clear currentlyProcessingUrl when switching videos
-      // This prevents streaming updates from old video bleeding into new overlay
-      if (currentlyProcessingUrl && currentlyProcessingUrl !== url) {
-        console.log(`[YouTube] CANCELING processing for: ${currentlyProcessingUrl}`);
-        currentlyProcessingUrl = null;
+      // Note: The actual abort happens in background.js when we send GET_YOUTUBE_SUMMARY
+      // for the new videoId. Background.js will check currentYouTubeVideoId and abort
+      // any ongoing summarization for a different video.
+    }
+    
+    // 2. Remove ANY existing overlay (could be from completed summary or in-progress)
+    if (currentYouTubeOverlay) {
+      if (currentYouTubeOverlayUrl !== url) {
+        console.log(`[YouTube] Removing old overlay (was for: ${currentYouTubeOverlayUrl}, now hovering: ${url})`);
+        removeYouTubeOverlay(true); // Immediate removal - this clears the overlay content
+      } else {
+        console.log(`[YouTube] Already have overlay for this URL, refreshing...`);
+        removeYouTubeOverlay(true); // Remove and recreate - clears everything
       }
-      
-      // 2. Remove ANY existing overlay (could be from completed summary or in-progress)
-      if (currentYouTubeOverlay) {
-        if (currentYouTubeOverlayUrl !== url) {
-          console.log(`[YouTube] Removing old overlay (was for: ${currentYouTubeOverlayUrl}, now hovering: ${url})`);
-          removeYouTubeOverlay(true); // Immediate removal
-        } else {
-          console.log(`[YouTube] Already have overlay for this URL, refreshing...`);
-          removeYouTubeOverlay(true); // Remove and recreate
-        }
-      }
+    }
       
       // 2. Clear old hover timeout
       if (currentHoverTimeout) {

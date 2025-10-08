@@ -121,6 +121,10 @@ let currentAbortController = null;
 let isProcessingSummary = false;
 let lastProcessedUrl = null;
 
+// YouTube-specific abort controller
+let currentYouTubeAbortController = null;
+let currentYouTubeVideoId = null;
+
 // Clean cache periodically
 setInterval(() => {
   const now = Date.now();
@@ -577,6 +581,14 @@ function captionsToText(captions) {
 async function handleYouTubeSummary(videoId, url) {
   console.log('[YouTube] Handling summary request for:', videoId);
   
+  // CRITICAL: Cancel previous YouTube summary if different video
+  if (currentYouTubeAbortController && currentYouTubeVideoId !== videoId) {
+    console.log('[YouTube] CANCELING previous summary for:', currentYouTubeVideoId);
+    currentYouTubeAbortController.abort();
+    currentYouTubeAbortController = null;
+    currentYouTubeVideoId = null;
+  }
+  
   // Check summary cache first
   const cachedSummary = youtubeSummaryCache.get(videoId);
   if (cachedSummary && (Date.now() - cachedSummary.timestamp) < CACHE_DURATION) {
@@ -652,9 +664,10 @@ async function handleYouTubeSummary(videoId, url) {
   
   // Generate summary using the same logic as webpage summarization
   try {
-    // Create abort controller for this request
-    const abortController = new AbortController();
-    const signal = abortController.signal;
+    // Create and track abort controller for this request
+    currentYouTubeAbortController = new AbortController();
+    currentYouTubeVideoId = videoId;
+    const signal = currentYouTubeAbortController.signal;
     
     // Use existing summarizeContent function
     const summary = await summarizeContent(captionText, signal, url);
@@ -667,6 +680,10 @@ async function handleYouTubeSummary(videoId, url) {
     
     console.log('[YouTube] Summary generated successfully');
     
+    // Clear abort controller after success
+    currentYouTubeAbortController = null;
+    currentYouTubeVideoId = null;
+    
     return {
       status: 'complete',
       cached: false,
@@ -676,6 +693,19 @@ async function handleYouTubeSummary(videoId, url) {
     };
   } catch (error) {
     console.error('[YouTube] Error generating summary:', error);
+    
+    // Clear abort controller after error
+    currentYouTubeAbortController = null;
+    currentYouTubeVideoId = null;
+    
+    // Check if it was aborted (user switched videos)
+    if (error.name === 'AbortError') {
+      return {
+        status: 'aborted',
+        message: 'Summary cancelled (switched to different video)'
+      };
+    }
+    
     return {
       status: 'error',
       error: 'SUMMARY_FAILED',
