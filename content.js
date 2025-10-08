@@ -279,7 +279,13 @@
   // Handle mouseover
   function handleMouseOver(e) {
     const link = findLink(e.target);
-    if (!link) return;
+    if (!link) {
+      // Only log on YouTube for debugging
+      if (IS_YOUTUBE) {
+        console.log('[YouTube] Mouseover but no link found, target:', e.target.tagName, e.target.className);
+      }
+      return;
+    }
     
     const url = link.href;
     const linkType = getLinkType(link, e.target);
@@ -289,6 +295,7 @@
     if (IS_YOUTUBE && isYouTubeThumbnail(e.target)) {
       console.log(`🎬 YOUTUBE THUMBNAIL: "${shortUrl}" (will trigger in ${HOVER_DELAY}ms)`);
       console.log(`[YouTube] Current processing: ${currentlyProcessingUrl}`);
+      console.log(`[YouTube] Current overlay: ${currentYouTubeOverlay ? 'exists for ' + currentYouTubeOverlayUrl : 'none'}`);
       
       // Find ONLY the thumbnail element (not the entire video card)
       // This ensures consistent sizing - overlay covers only thumbnail, not title/channel
@@ -306,10 +313,15 @@
       }
       
       // CRITICAL: Cancel old processing BEFORE starting new one
-      // 1. Remove old overlay immediately
-      if (currentYouTubeOverlay && currentlyProcessingUrl && currentlyProcessingUrl !== url) {
-        console.log(`[YouTube] Switching from ${currentlyProcessingUrl} to ${url}, removing old overlay`);
-        removeYouTubeOverlay(true);
+      // 1. Remove ANY existing overlay (could be from completed summary or in-progress)
+      if (currentYouTubeOverlay) {
+        if (currentYouTubeOverlayUrl !== url) {
+          console.log(`[YouTube] Removing old overlay (was for: ${currentYouTubeOverlayUrl}, now hovering: ${url})`);
+          removeYouTubeOverlay(true); // Immediate removal
+        } else {
+          console.log(`[YouTube] Already have overlay for this URL, refreshing...`);
+          removeYouTubeOverlay(true); // Remove and recreate
+        }
         currentlyProcessingUrl = null;
       }
       
@@ -401,13 +413,17 @@
         hoverTimeouts.delete(url);
       }
       
-      // Only remove overlay if this thumbnail is currently processing/displaying
-      if (currentlyProcessingUrl === url) {
-        console.log('[YouTube] Mouse left current thumbnail, removing overlay');
+      // Remove overlay if this thumbnail currently has it displayed
+      // Check BOTH currentlyProcessingUrl (for in-progress) AND currentYouTubeOverlayUrl (for completed)
+      // because currentlyProcessingUrl is cleared when summary completes, but overlay remains visible
+      const isCurrentThumbnail = (currentlyProcessingUrl === url) || (currentYouTubeOverlayUrl === url);
+      
+      if (isCurrentThumbnail && currentYouTubeOverlay) {
+        console.log('[YouTube] Mouse left current thumbnail (has overlay), removing it');
         removeYouTubeOverlay();
         currentlyProcessingUrl = null;
       } else {
-        console.log('[YouTube] Mouse left thumbnail (not current), ignoring');
+        console.log('[YouTube] Mouse left thumbnail (no overlay here), ignoring');
       }
       return;
     }
