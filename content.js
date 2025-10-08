@@ -292,8 +292,6 @@
     // Check if this is a YouTube thumbnail first
     if (IS_YOUTUBE && isYouTubeThumbnail(e.target)) {
       console.log(`🎬 YOUTUBE THUMBNAIL: "${shortUrl}" (will trigger in ${HOVER_DELAY}ms)`);
-      console.log(`[YouTube] Current processing: ${currentlyProcessingUrl}`);
-      console.log(`[YouTube] Current overlay: ${currentYouTubeOverlay ? 'exists for ' + currentYouTubeOverlayUrl : 'none'}`);
       
       // Find ONLY the thumbnail element (not the entire video card)
       // This ensures consistent sizing - overlay covers only thumbnail, not title/channel
@@ -310,28 +308,28 @@
         return;
       }
       
-    // CRITICAL: Send abort for old video BEFORE any UI changes
-    if (currentlyProcessingUrl && currentlyProcessingUrl !== url) {
-      const oldVideoId = extractVideoId(currentlyProcessingUrl);
-      console.log(`[YouTube] ⛔ ABORTING old video: ${oldVideoId}`);
+      // CRITICAL: If we're switching videos, abort the old one
+      if (currentYouTubeOverlayUrl && currentYouTubeOverlayUrl !== url) {
+        const oldVideoId = extractVideoId(currentYouTubeOverlayUrl);
+        console.log(`[YouTube] 🛑 ABORTING previous video: ${oldVideoId}`);
+        
+        // Send abort message
+        chrome.runtime.sendMessage({
+          action: 'ABORT_YOUTUBE_SUMMARY',
+          videoId: oldVideoId
+        }).catch(err => console.error('[YouTube] Abort send failed:', err));
+        
+        // Clear processing URL immediately
+        currentlyProcessingUrl = null;
+      }
       
-      // Send abort immediately and don't wait for response
-      chrome.runtime.sendMessage({
-        action: 'ABORT_YOUTUBE_SUMMARY',
-        videoId: oldVideoId
-      }).catch(() => {});
-      
-      // Clear processing URL immediately
-      currentlyProcessingUrl = null;
-    }
-    
-    // Then remove overlay
-    if (currentYouTubeOverlay) {
-      console.log(`[YouTube] Removing overlay for: ${currentYouTubeOverlayUrl}`);
-      removeYouTubeOverlay(true);
-      currentYouTubeOverlay = null;
-      currentYouTubeOverlayUrl = null;
-    }
+      // Then remove overlay
+      if (currentYouTubeOverlay) {
+        console.log(`[YouTube] Removing overlay for: ${currentYouTubeOverlayUrl}`);
+        removeYouTubeOverlay(true);
+        currentYouTubeOverlay = null;
+        currentYouTubeOverlayUrl = null;
+      }
       
       // 2. Clear old hover timeout
       if (currentHoverTimeout) {
