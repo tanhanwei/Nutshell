@@ -129,6 +129,9 @@ let currentYouTubeVideoId = null;
 let currentSummarizerSession = null;
 let currentPromptSession = null;
 
+// Alternative approach: Simple global video ID tracking for streaming
+let currentStreamingVideoId = null;
+
 // Clean cache periodically
 setInterval(() => {
   const now = Date.now();
@@ -242,10 +245,23 @@ async function useSummarizationAPI(text, signal, url) {
       let lastBroadcast = 0;
       const BROADCAST_INTERVAL = 150;
       
+      // Store the videoId for this specific stream at the start
+      const videoIdForThisStream = url.includes('watch?v=') ? new URL(url).searchParams.get('v') : null;
+      console.log('[Streaming] Starting stream for videoId:', videoIdForThisStream);
+      
       for await (const chunk of stream) {
         // Add debug line - log every ~100 chars
         if (fullSummary.length % 100 < 10) {
-          console.log(`[Streaming] Progress: ${fullSummary.length} chars, Aborted: ${signal?.aborted}, URL match: ${url === lastProcessedUrl}`);
+          console.log(`[Streaming] Progress: ${fullSummary.length} chars, thisVideo: ${videoIdForThisStream}, currentVideo: ${currentStreamingVideoId}`);
+        }
+        
+        // ✅ ALTERNATIVE APPROACH: Check if we're still processing the same video
+        if (videoIdForThisStream && currentStreamingVideoId && currentStreamingVideoId !== videoIdForThisStream) {
+          console.log('[Background] 🔴 VIDEO CHANGED - stopping stream');
+          console.log(`  This stream is for: ${videoIdForThisStream}, but now processing: ${currentStreamingVideoId}`);
+          summarizer.destroy();
+          currentSummarizerSession = null;
+          throw new DOMException('Aborted', 'AbortError');
         }
         
         // ✅ ENHANCED: Check abort BEFORE processing chunk
@@ -268,14 +284,6 @@ async function useSummarizationAPI(text, signal, url) {
         if (!currentSummarizerSession) {
           console.log('[Background] 🔴 SESSION DESTROYED - stopping stream');
           throw new DOMException('Session destroyed', 'AbortError');
-        }
-        
-        // Check if URL changed
-        if (url !== lastProcessedUrl) {
-          console.log('[Background] 🔴 URL CHANGED - stopping stream');
-          summarizer.destroy();
-          currentSummarizerSession = null;
-          throw new DOMException('Aborted', 'AbortError');
         }
         
         fullSummary += chunk;
@@ -402,10 +410,23 @@ async function usePromptAPI(text, signal, url) {
       let lastBroadcast = 0;
       const BROADCAST_INTERVAL = 150;
       
+      // Store the videoId for this specific stream at the start
+      const videoIdForThisStream = url.includes('watch?v=') ? new URL(url).searchParams.get('v') : null;
+      console.log('[Streaming] Starting stream for videoId:', videoIdForThisStream);
+      
       for await (const chunk of stream) {
         // Add debug line - log every ~100 chars
         if (fullSummary.length % 100 < 10) {
-          console.log(`[Streaming] Progress: ${fullSummary.length} chars, Aborted: ${signal?.aborted}, URL match: ${url === lastProcessedUrl}`);
+          console.log(`[Streaming] Progress: ${fullSummary.length} chars, thisVideo: ${videoIdForThisStream}, currentVideo: ${currentStreamingVideoId}`);
+        }
+        
+        // ✅ ALTERNATIVE APPROACH: Check if we're still processing the same video
+        if (videoIdForThisStream && currentStreamingVideoId && currentStreamingVideoId !== videoIdForThisStream) {
+          console.log('[Background] 🔴 VIDEO CHANGED - stopping stream');
+          console.log(`  This stream is for: ${videoIdForThisStream}, but now processing: ${currentStreamingVideoId}`);
+          session.destroy();
+          currentPromptSession = null;
+          throw new DOMException('Aborted', 'AbortError');
         }
         
         // ✅ ENHANCED: Check abort BEFORE processing chunk
@@ -428,14 +449,6 @@ async function usePromptAPI(text, signal, url) {
         if (!currentPromptSession) {
           console.log('[Background] 🔴 SESSION DESTROYED - stopping stream');
           throw new DOMException('Session destroyed', 'AbortError');
-        }
-        
-        // Check if URL changed
-        if (url !== lastProcessedUrl) {
-          console.log('[Background] 🔴 URL CHANGED - stopping stream');
-          session.destroy();
-          currentPromptSession = null;
-          throw new DOMException('Aborted', 'AbortError');
         }
         
         fullSummary += chunk;
@@ -766,7 +779,11 @@ async function handleYouTubeSummary(videoId, url) {
   lastProcessedUrl = url;
   const signal = currentYouTubeAbortController.signal;
   
+  // ALTERNATIVE APPROACH: Set global streaming video ID BEFORE starting stream
+  currentStreamingVideoId = videoId;
+  
   console.log('[YouTube] Created new abort controller for:', videoId);
+  console.log('[YouTube] Set currentStreamingVideoId to:', videoId);
   
   // Check summary cache first
   const cachedSummary = youtubeSummaryCache.get(videoId);
@@ -1017,9 +1034,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       currentPromptSession = null;
     }
     
-    // Clear video ID
+    // Clear video IDs
     currentYouTubeVideoId = null;
     lastProcessedUrl = null;
+    currentStreamingVideoId = null;  // Clear alternative approach tracking
     
     sendResponse({ status: 'aborted', message: 'All sessions destroyed' });
     return true; // Keep channel open
