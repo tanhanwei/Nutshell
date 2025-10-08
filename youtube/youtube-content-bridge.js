@@ -49,6 +49,44 @@
     return false;
   };
   
+  // Listen for messages from background.js
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.action === 'GET_YOUTUBE_CAPTIONS') {
+      const videoId = message.videoId;
+      console.log('[YouTube Bridge] Caption request for:', videoId);
+      
+      try {
+        // Try to get captions from page context
+        const captions = window.getYouTubeCaptions(videoId);
+        
+        if (captions) {
+          console.log('[YouTube Bridge] Captions found!');
+          sendResponse({
+            success: true,
+            data: captions,
+            videoId: videoId
+          });
+        } else {
+          console.warn('[YouTube Bridge] No captions found for:', videoId);
+          sendResponse({
+            success: false,
+            error: 'NO_CAPTIONS',
+            videoId: videoId
+          });
+        }
+      } catch (error) {
+        console.error('[YouTube Bridge] Error getting captions:', error);
+        sendResponse({
+          success: false,
+          error: error.message,
+          videoId: videoId
+        });
+      }
+      
+      return false; // Synchronous response
+    }
+  });
+  
   console.log('[YouTube Bridge] Ready!');
 })();
 

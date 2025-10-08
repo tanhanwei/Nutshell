@@ -113,6 +113,8 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
 
 const htmlCache = {};
 const summaryCache = new Map();
+const youtubeCaptionCache = new Map(); // Cache for YouTube caption data
+const youtubeSummaryCache = new Map(); // Cache for YouTube summaries
 const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
 
 let currentAbortController = null;
@@ -502,6 +504,176 @@ function broadcastProcessingStatus(status, title) {
 }
 
 // ========================================
+// YOUTUBE CAPTION HELPERS
+// ========================================
+
+/**
+ * Parse caption data from various YouTube formats
+ */
+function parseCaptionData(data) {
+  try {
+    if (typeof data === 'string') {
+      // Try JSON3 format first
+      if (data.includes('"events"') || data.includes('"wireMagic"')) {
+        const jsonData = JSON.parse(data);
+        if (jsonData.events) {
+          return jsonData.events
+            .map(event => {
+              if (event.segs) {
+                const text = event.segs.map(seg => seg.utf8 || '').join('');
+                return {
+                  start: (event.tStartMs || 0) / 1000,
+                  duration: (event.dDurationMs || 0) / 1000,
+                  text: text
+                };
+              }
+              return null;
+            })
+            .filter(Boolean);
+        }
+      }
+      
+      // Try XML format
+      if (data.includes('<?xml') || data.includes('<transcript>')) {
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(data, 'text/xml');
+        const texts = xmlDoc.getElementsByTagName('text');
+        return Array.from(texts).map(node => ({
+          start: parseFloat(node.getAttribute('start') || 0),
+          duration: parseFloat(node.getAttribute('dur') || 0),
+          text: node.textContent
+        }));
+      }
+      
+      // Try standard JSON
+      if (data.trim().startsWith('[') || data.trim().startsWith('{')) {
+        return JSON.parse(data);
+      }
+    }
+    
+    return data;
+  } catch (error) {
+    console.error('[YouTube] Error parsing caption data:', error);
+    return null;
+  }
+}
+
+/**
+ * Convert caption array to plain text
+ */
+function captionsToText(captions) {
+  if (!Array.isArray(captions)) return '';
+  return captions
+    .map(caption => caption.text || '')
+    .filter(text => text.trim())
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Handle YouTube caption summarization
+ */
+async function handleYouTubeSummary(videoId, url) {
+  console.log('[YouTube] Handling summary request for:', videoId);
+  
+  // Check summary cache first
+  const cachedSummary = youtubeSummaryCache.get(videoId);
+  if (cachedSummary && (Date.now() - cachedSummary.timestamp) < CACHE_DURATION) {
+    console.log('[YouTube] Returning cached summary');
+    return {
+      status: 'complete',
+      cached: true,
+      summary: cachedSummary.summary,
+      videoId: videoId
+    };
+  }
+  
+  // Check if captions are cached
+  let captionData = youtubeCaptionCache.get(videoId);
+  
+  if (!captionData) {
+    console.log('[YouTube] Captions not in cache, requesting from bridge...');
+    
+    // Request captions from the YouTube bridge
+    // The bridge will check with the page-injected handler
+    try {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tabs[0]) {
+        throw new Error('No active tab found');
+      }
+      
+      const response = await chrome.tabs.sendMessage(tabs[0].id, {
+        action: 'GET_YOUTUBE_CAPTIONS',
+        videoId: videoId
+      });
+      
+      if (!response || !response.success) {
+        throw new Error(response?.error || 'Failed to get captions');
+      }
+      
+      captionData = response.data;
+      
+      // The data from the handler is an object: {videoId, captions, text, timestamp}
+      // Cache the caption data
+      youtubeCaptionCache.set(videoId, {
+        data: captionData,
+        timestamp: captionData.timestamp || Date.now()
+      });
+      
+    } catch (error) {
+      console.error('[YouTube] Error getting captions:', error);
+      return {
+        status: 'error',
+        error: 'NO_CAPTIONS',
+        message: 'Could not retrieve captions for this video'
+      };
+    }
+  } else {
+    console.log('[YouTube] Using cached caption data');
+    captionData = captionData.data;
+  }
+  
+  // The captionData is now an object: {videoId, captions, text, timestamp}
+  // Check if we have the captions array
+  const captionArray = captionData.captions || [];
+  const captionText = captionData.text || captionsToText(captionArray);
+  
+  if (!captionArray || captionArray.length === 0 || !captionText || captionText.length < 10) {
+    return {
+      status: 'error',
+      error: 'NO_CAPTIONS',
+      message: 'No captions available for this video'
+    };
+  }
+  
+  console.log('[YouTube] Caption count:', captionArray.length);
+  console.log('[YouTube] Caption text length:', captionText.length);
+  
+  // Generate summary using the same logic as webpage summarization
+  const summaryPrompt = settings.usePromptAPI && settings.customPrompt
+    ? `${settings.customPrompt}\n\nVideo Transcript:\n${captionText}`
+    : captionText;
+  
+  // Use existing generateSummary function
+  const summary = await generateSummary(summaryPrompt, settings, null);
+  
+  // Cache the summary
+  youtubeSummaryCache.set(videoId, {
+    summary: summary,
+    timestamp: Date.now()
+  });
+  
+  return {
+    status: 'complete',
+    cached: false,
+    summary: summary,
+    videoId: videoId,
+    captionCount: captionArray.length
+  };
+}
+
+// ========================================
 // MESSAGE HANDLERS
 // ========================================
 
@@ -585,6 +757,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch(error => {
         console.error('[Background] Failed to fetch captions:', error);
         sendResponse({ success: false, error: error.message });
+      });
+    
+    return true; // Keep channel open for async response
+  }
+  
+  // Handle YouTube summary request
+  if (message.action === 'GET_YOUTUBE_SUMMARY') {
+    const videoId = message.videoId;
+    const url = message.url;
+    
+    console.log('[Background] YouTube summary requested for:', videoId);
+    
+    handleYouTubeSummary(videoId, url)
+      .then(result => {
+        console.log('[Background] YouTube summary result:', result.status);
+        sendResponse(result);
+      })
+      .catch(error => {
+        console.error('[Background] YouTube summary error:', error);
+        sendResponse({
+          status: 'error',
+          error: 'PROCESSING_ERROR',
+          message: error.message
+        });
       });
     
     return true; // Keep channel open for async response

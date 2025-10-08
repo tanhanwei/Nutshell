@@ -3,11 +3,12 @@
   
   // Configuration
   const HOVER_DELAY = 300;
-  const DEBUG_ENABLED = !window.location.hostname.includes('youtube.com'); // Disable logs on YouTube to reduce clutter
+  const IS_YOUTUBE = window.location.hostname.includes('youtube.com');
+  const DEBUG_ENABLED = !IS_YOUTUBE; // Disable logs on YouTube to reduce clutter
   
   // Debug logging helper
   const debugLog = (...args) => {
-    if (DEBUG_ENABLED) debugLog(...args);
+    if (DEBUG_ENABLED) console.log(...args);
   };
   
   // State management
@@ -278,6 +279,27 @@
     const url = link.href;
     const linkType = getLinkType(link, e.target);
     const shortUrl = getShortUrl(url);
+    
+    // Check if this is a YouTube thumbnail first
+    if (IS_YOUTUBE && isYouTubeThumbnail(e.target)) {
+      console.log(`🎬 YOUTUBE THUMBNAIL: "${shortUrl}" (will trigger in ${HOVER_DELAY}ms)`);
+      
+      // Cancel any previous hover/hide
+      clearTimeout(currentHoverTimeout);
+      if (hideTimeout) {
+        clearTimeout(hideTimeout);
+        hideTimeout = null;
+      }
+      
+      currentHoveredElement = link;
+      currentlyProcessingUrl = url; // Mark as processing
+      
+      currentHoverTimeout = setTimeout(() => {
+        handleYouTubeThumbnailHover(e.target, url);
+      }, HOVER_DELAY);
+      
+      return; // Don't process as regular link
+    }
     
     // Don't re-trigger if we're already processing this exact URL
     if (currentlyProcessingUrl === url) {
@@ -613,4 +635,123 @@
     
     return formatted;
   }
+  
+  // ============ YouTube-Specific Functions ============
+  
+  /**
+   * Extract video ID from a YouTube URL
+   */
+  function extractVideoId(url) {
+    if (!url) return null;
+    
+    const patterns = [
+      /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\n?#]+)/,
+      /youtube\.com\/shorts\/([^&\n?#]+)/,
+      /\/vi\/([^\/]+)/,
+      /\/vi_webp\/([^\/]+)/,
+      /[?&]v=([^&\n?#]+)/,
+    ];
+    
+    for (const pattern of patterns) {
+      const match = url.match(pattern);
+      if (match && match[1]) {
+        return match[1];
+      }
+    }
+    
+    return null;
+  }
+  
+  /**
+   * Check if an element is a YouTube thumbnail
+   */
+  function isYouTubeThumbnail(element) {
+    if (!IS_YOUTUBE) return false;
+    
+    const thumbnailSelectors = [
+      'ytd-thumbnail',
+      'ytd-rich-item-renderer',
+      'ytd-compact-video-renderer',
+      'ytd-video-preview',
+      'ytd-playlist-thumbnail',
+      'a#thumbnail'
+    ];
+    
+    for (const selector of thumbnailSelectors) {
+      if (element.matches(selector) || element.closest(selector)) {
+        return true;
+      }
+    }
+    
+    return false;
+  }
+  
+  /**
+   * Handle YouTube thumbnail hover - extract video ID and request caption summary
+   */
+  async function handleYouTubeThumbnailHover(element, url) {
+    console.log('[YouTube] Thumbnail hover detected:', url);
+    
+    // Extract video ID
+    const videoId = extractVideoId(url);
+    if (!videoId) {
+      console.warn('[YouTube] Could not extract video ID from:', url);
+      return;
+    }
+    
+    console.log('[YouTube] Video ID:', videoId);
+    
+    // Show "Fetching captions..." in tooltip
+    if (displayMode === 'tooltip' || displayMode === 'both') {
+      showTooltip('Fetching captions...', element);
+    }
+    
+    // Send message to background to get caption summary
+    try {
+      chrome.runtime.sendMessage({
+        action: 'GET_YOUTUBE_SUMMARY',
+        videoId: videoId,
+        url: url
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          console.error('[YouTube] Runtime error:', chrome.runtime.lastError);
+          showTooltip('Error: Extension context lost', element);
+          return;
+        }
+        
+        if (response && response.status === 'complete') {
+          // Display the summary
+          const formatted = formatAISummary(response.summary);
+          
+          if (displayMode === 'tooltip' || displayMode === 'both') {
+            showTooltip(formatted, element);
+          }
+          
+          if (displayMode === 'sidepanel' || displayMode === 'both') {
+            // Send to side panel
+            chrome.runtime.sendMessage({
+              action: 'DISPLAY_CACHED_SUMMARY',
+              summary: response.summary,
+              url: url
+            });
+          }
+        } else if (response && response.status === 'streaming') {
+          // Update tooltip with streaming content
+          if (displayMode === 'tooltip' || displayMode === 'both') {
+            showTooltip('Generating summary...', element);
+          }
+          // Streaming updates will come through runtime.onMessage listener
+        } else if (response && response.error) {
+          const errorMsg = response.error === 'NO_CAPTIONS' 
+            ? 'No captions available for this video' 
+            : `Error: ${response.error}`;
+          showTooltip(errorMsg, element);
+        }
+      });
+    } catch (error) {
+      console.error('[YouTube] Error requesting summary:', error);
+      showTooltip('Error fetching captions', element);
+    }
+  }
+  
 })();
