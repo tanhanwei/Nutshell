@@ -23,6 +23,11 @@
   let currentHoveredElement = null;
   let isMouseInTooltip = false;
   let displayTimes = new Map(); // Track when each URL was displayed (url -> timestamp)
+  let hoverTimeouts = new Map(); // Track hover timeouts per URL (url -> timeout ID)
+  
+  // YouTube-specific state
+  let currentYouTubeOverlay = null; // Track active YouTube overlay
+  let currentYouTubeOverlayUrl = null; // Track which URL the YouTube overlay is for
   
   // Create tooltip
   function createTooltip() {
@@ -283,6 +288,7 @@
     // Check if this is a YouTube thumbnail first
     if (IS_YOUTUBE && isYouTubeThumbnail(e.target)) {
       console.log(`🎬 YOUTUBE THUMBNAIL: "${shortUrl}" (will trigger in ${HOVER_DELAY}ms)`);
+      console.log(`[YouTube] Current processing: ${currentlyProcessingUrl}`);
       
       // Find ONLY the thumbnail element (not the entire video card)
       // This ensures consistent sizing - overlay covers only thumbnail, not title/channel
@@ -299,19 +305,43 @@
         return;
       }
       
-      // Cancel any previous hover/hide
-      clearTimeout(currentHoverTimeout);
+      // CRITICAL: Cancel old processing BEFORE starting new one
+      // 1. Remove old overlay immediately
+      if (currentYouTubeOverlay && currentlyProcessingUrl && currentlyProcessingUrl !== url) {
+        console.log(`[YouTube] Switching from ${currentlyProcessingUrl} to ${url}, removing old overlay`);
+        removeYouTubeOverlay(true);
+        currentlyProcessingUrl = null;
+      }
+      
+      // 2. Clear old hover timeout
+      if (currentHoverTimeout) {
+        clearTimeout(currentHoverTimeout);
+        currentHoverTimeout = null;
+      }
+      
+      // 3. Clear this URL's previous timeout if any
+      const oldTimeout = hoverTimeouts.get(url);
+      if (oldTimeout) {
+        clearTimeout(oldTimeout);
+      }
+      
+      // 4. Clear hide timeout
       if (hideTimeout) {
         clearTimeout(hideTimeout);
         hideTimeout = null;
       }
       
       currentHoveredElement = link;
-      currentlyProcessingUrl = url; // Mark as processing
       
-      currentHoverTimeout = setTimeout(() => {
+      // Schedule hover (DON'T set currentlyProcessingUrl yet - that happens when timeout fires!)
+      const hoverTimeout = setTimeout(() => {
+        hoverTimeouts.delete(url); // Clean up
         handleYouTubeThumbnailHover(thumbnailElement, link, url);
       }, HOVER_DELAY);
+      
+      // Store timeout for this URL
+      hoverTimeouts.set(url, hoverTimeout);
+      currentHoverTimeout = hoverTimeout; // Keep for compatibility
       
       return; // Don't process as regular link
     }
@@ -351,7 +381,6 @@
     if (IS_YOUTUBE && isYouTubeThumbnail(e.target)) {
       console.log('[YouTube] Mouseout detected from thumbnail, url:', url);
       console.log('[YouTube] currentlyProcessingUrl:', currentlyProcessingUrl);
-      console.log('[YouTube] URL match:', currentlyProcessingUrl === url);
       
       const relatedTarget = e.relatedTarget;
       
@@ -364,15 +393,21 @@
         }
       }
       
-      // IMPORTANT: Only remove overlay if this is the currently processing URL
-      // Don't remove if we're already processing a different thumbnail
+      // Cancel this URL's pending hover timeout (if any)
+      const pendingTimeout = hoverTimeouts.get(url);
+      if (pendingTimeout) {
+        console.log('[YouTube] Canceling pending hover for:', url);
+        clearTimeout(pendingTimeout);
+        hoverTimeouts.delete(url);
+      }
+      
+      // Only remove overlay if this thumbnail is currently processing/displaying
       if (currentlyProcessingUrl === url) {
         console.log('[YouTube] Mouse left current thumbnail, removing overlay');
         removeYouTubeOverlay();
         currentlyProcessingUrl = null;
-        clearTimeout(currentHoverTimeout);
       } else {
-        console.log('[YouTube] Mouse left old thumbnail (different from current), ignoring');
+        console.log('[YouTube] Mouse left thumbnail (not current), ignoring');
       }
       return;
     }
@@ -691,9 +726,6 @@
   }
   
   // ============ YouTube-Specific Functions ============
-  
-  let currentYouTubeOverlay = null; // Track active overlay
-  let currentYouTubeOverlayUrl = null; // Track which URL the overlay is for
   
   /**
    * Create YouTube summary overlay inside thumbnail
