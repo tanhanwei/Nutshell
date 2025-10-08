@@ -707,7 +707,7 @@
     
     // Show "Fetching captions..." in tooltip
     if (displayMode === 'tooltip' || displayMode === 'both') {
-      showTooltip('Fetching captions...', linkElement);
+      showTooltip(linkElement, 'Fetching captions...', url);
     }
     
     // Send message to background to get caption summary
@@ -719,7 +719,7 @@
       }, (response) => {
         if (chrome.runtime.lastError) {
           console.error('[YouTube] Runtime error:', chrome.runtime.lastError);
-          showTooltip('Error: Extension context lost', linkElement);
+          showTooltip(linkElement, 'Error: Extension context lost', url);
           currentlyProcessingUrl = null;
           return;
         }
@@ -738,7 +738,7 @@
           displayTimes.set(url, Date.now());
           
           if (displayMode === 'tooltip' || displayMode === 'both') {
-            showTooltip(formatted, linkElement);
+            showTooltip(linkElement, formatted, url);
           }
           
           if (displayMode === 'sidepanel' || displayMode === 'both') {
@@ -757,24 +757,24 @@
         } else if (response && response.status === 'streaming') {
           // Update tooltip with streaming content
           if (displayMode === 'tooltip' || displayMode === 'both') {
-            showTooltip('Generating summary...', linkElement);
+            showTooltip(linkElement, 'Generating summary...', url);
           }
           // Streaming updates will come through runtime.onMessage listener
         } else if (response && response.error) {
           const errorMsg = response.error === 'NO_CAPTIONS' 
             ? 'No captions available for this video' 
             : `Error: ${response.error}`;
-          showTooltip(errorMsg, linkElement);
+          showTooltip(linkElement, errorMsg, url);
           currentlyProcessingUrl = null;
         } else {
           console.warn('[YouTube] Unexpected response:', response);
-          showTooltip('Error: Unexpected response', linkElement);
+          showTooltip(linkElement, 'Error: Unexpected response', url);
           currentlyProcessingUrl = null;
         }
       });
     } catch (error) {
       console.error('[YouTube] Error requesting summary:', error);
-      showTooltip('Error fetching captions', linkElement);
+      showTooltip(linkElement, 'Error fetching captions', url);
       currentlyProcessingUrl = null;
     }
   }
