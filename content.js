@@ -349,6 +349,10 @@
     
     // Handle YouTube thumbnail mouseout
     if (IS_YOUTUBE && isYouTubeThumbnail(e.target)) {
+      console.log('[YouTube] Mouseout detected from thumbnail, url:', url);
+      console.log('[YouTube] currentlyProcessingUrl:', currentlyProcessingUrl);
+      console.log('[YouTube] URL match:', currentlyProcessingUrl === url);
+      
       const relatedTarget = e.relatedTarget;
       
       // Check if moving into the overlay itself
@@ -360,11 +364,16 @@
         }
       }
       
-      // Otherwise, remove the overlay
-      console.log('[YouTube] Mouse left thumbnail, removing overlay');
-      removeYouTubeOverlay();
-      currentlyProcessingUrl = null;
-      clearTimeout(currentHoverTimeout);
+      // IMPORTANT: Only remove overlay if this is the currently processing URL
+      // Don't remove if we're already processing a different thumbnail
+      if (currentlyProcessingUrl === url) {
+        console.log('[YouTube] Mouse left current thumbnail, removing overlay');
+        removeYouTubeOverlay();
+        currentlyProcessingUrl = null;
+        clearTimeout(currentHoverTimeout);
+      } else {
+        console.log('[YouTube] Mouse left old thumbnail (different from current), ignoring');
+      }
       return;
     }
     
@@ -831,13 +840,21 @@
    * Update YouTube overlay content (only if it's for the right URL)
    */
   function updateYouTubeOverlay(content, forUrl) {
+    console.log('[YouTube] updateYouTubeOverlay called with forUrl:', forUrl);
+    console.log('[YouTube] currentYouTubeOverlay:', currentYouTubeOverlay ? 'exists' : 'NULL');
+    console.log('[YouTube] currentYouTubeOverlayUrl:', currentYouTubeOverlayUrl);
+    
     if (currentYouTubeOverlay) {
       // Only update if this is for the current overlay's URL (prevent stale updates)
       if (!forUrl || currentYouTubeOverlayUrl === forUrl) {
+        console.log('[YouTube] Updating overlay content, length:', content.length);
         currentYouTubeOverlay.contentArea.innerHTML = content;
+        console.log('[YouTube] Overlay content updated successfully');
       } else {
         console.log(`[YouTube] Ignoring update for ${forUrl}, current overlay is for ${currentYouTubeOverlayUrl}`);
       }
+    } else {
+      console.warn('[YouTube] Cannot update overlay - currentYouTubeOverlay is NULL');
     }
   }
   
@@ -904,6 +921,10 @@
     }
     
     console.log('[YouTube] Video ID:', videoId);
+    
+    // CRITICAL: Set currentlyProcessingUrl BEFORE any async operations
+    // This ensures streaming updates and response handling work correctly
+    currentlyProcessingUrl = url;
     
     // Store element for positioning
     processingElement = linkElement;
@@ -991,6 +1012,9 @@
         }
         
         console.log('[YouTube] Response:', response);
+        console.log('[YouTube] Current overlay:', currentYouTubeOverlay ? 'exists' : 'NULL');
+        console.log('[YouTube] Current overlay URL:', currentYouTubeOverlayUrl);
+        console.log('[YouTube] Response URL:', url);
         
         if (response && response.status === 'complete') {
           // Display the summary
@@ -1004,7 +1028,9 @@
           displayTimes.set(url, Date.now());
           
           // Show summary in overlay
+          console.log('[YouTube] About to call updateYouTubeOverlay...');
           updateYouTubeOverlay(formatted, url);
+          console.log('[YouTube] updateYouTubeOverlay called');
           
           // Also send to side panel if enabled
           if (displayMode === 'sidepanel' || displayMode === 'both') {
