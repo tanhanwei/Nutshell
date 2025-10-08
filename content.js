@@ -293,6 +293,13 @@
     if (IS_YOUTUBE && isYouTubeThumbnail(e.target)) {
       console.log(`🎬 YOUTUBE THUMBNAIL: "${shortUrl}" (will trigger in ${HOVER_DELAY}ms)`);
       
+      // ADD COMPREHENSIVE DEBUGGING
+      console.log(`[DEBUG] Current states:
+    - currentlyProcessingUrl: ${currentlyProcessingUrl}
+    - currentYouTubeOverlayUrl: ${currentYouTubeOverlayUrl}
+    - New URL: ${url}
+    - URLs match: ${currentlyProcessingUrl === url || currentYouTubeOverlayUrl === url}`);
+      
       // Find ONLY the thumbnail element (not the entire video card)
       // This ensures consistent sizing - overlay covers only thumbnail, not title/channel
       let thumbnailElement = e.target.closest('ytd-thumbnail');
@@ -308,18 +315,30 @@
         return;
       }
       
-      // CRITICAL: If we're switching videos, abort the old one
-      if (currentYouTubeOverlayUrl && currentYouTubeOverlayUrl !== url) {
-        const oldVideoId = extractVideoId(currentYouTubeOverlayUrl);
-        console.log(`[YouTube] 🛑 ABORTING previous video: ${oldVideoId}`);
+      // Critical check: Are we switching videos?
+      const isSwitch = (currentlyProcessingUrl && currentlyProcessingUrl !== url) || 
+                       (currentYouTubeOverlayUrl && currentYouTubeOverlayUrl !== url);
+      
+      if (isSwitch) {
+        console.log(`[YouTube] 🔴 SWITCHING FROM ${currentlyProcessingUrl || currentYouTubeOverlayUrl} TO ${url}`);
+        
+        // Get old video ID
+        const oldUrl = currentlyProcessingUrl || currentYouTubeOverlayUrl;
+        const oldVideoId = extractVideoId(oldUrl);
+        const newVideoId = extractVideoId(url);
+        
+        console.log(`[YouTube] 🛑 SENDING ABORT for old video: ${oldVideoId}`);
         
         // Send abort message
         chrome.runtime.sendMessage({
           action: 'ABORT_YOUTUBE_SUMMARY',
-          videoId: oldVideoId
-        }).catch(err => console.error('[YouTube] Abort send failed:', err));
+          videoId: oldVideoId,
+          newVideoId: newVideoId // Include new video for debugging
+        }, response => {
+          console.log(`[YouTube] Abort response:`, response);
+        });
         
-        // Clear processing URL immediately
+        // Clear states immediately
         currentlyProcessingUrl = null;
       }
       
