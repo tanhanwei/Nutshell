@@ -33,20 +33,73 @@
     }));
   });
   
-  // Expose function for content.js to get captions
-  window.getYouTubeCaptions = function(videoId) {
-    // Access page context function
-    if (window.__ytGetCaptions) {
-      return window.__ytGetCaptions(videoId);
+  // Use postMessage to communicate with page context
+  // Content scripts can't directly access page context variables
+  
+  const pendingCaptionRequests = new Map(); // requestId -> {resolve, reject}
+  let requestIdCounter = 0;
+  
+  // Listen for responses from page context
+  window.addEventListener('message', (event) => {
+    // Only accept messages from same origin
+    if (event.source !== window) return;
+    
+    if (event.data.type === 'YT_CAPTIONS_RESPONSE') {
+      const { requestId, success, data, videoId } = event.data;
+      const pending = pendingCaptionRequests.get(requestId);
+      
+      if (pending) {
+        pendingCaptionRequests.delete(requestId);
+        if (success) {
+          console.log('[YouTube Bridge] Received captions for:', videoId);
+          pending.resolve(data);
+        } else {
+          console.warn('[YouTube Bridge] No captions for:', videoId);
+          pending.reject(new Error('NO_CAPTIONS'));
+        }
+      }
     }
-    return null;
+  });
+  
+  // Function to request captions from page context
+  function getCaptionsFromPage(videoId) {
+    return new Promise((resolve, reject) => {
+      const requestId = ++requestIdCounter;
+      pendingCaptionRequests.set(requestId, { resolve, reject });
+      
+      // Send request to page context
+      window.postMessage({
+        type: 'YT_GET_CAPTIONS',
+        requestId: requestId,
+        videoId: videoId
+      }, '*');
+      
+      // Timeout after 1 second
+      setTimeout(() => {
+        if (pendingCaptionRequests.has(requestId)) {
+          pendingCaptionRequests.delete(requestId);
+          reject(new Error('TIMEOUT'));
+        }
+      }, 1000);
+    });
+  }
+  
+  // Expose function for content.js
+  window.getYouTubeCaptions = async function(videoId) {
+    try {
+      return await getCaptionsFromPage(videoId);
+    } catch (error) {
+      return null;
+    }
   };
   
-  window.hasYouTubeCaptions = function(videoId) {
-    if (window.__ytHasCaptions) {
-      return window.__ytHasCaptions(videoId);
+  window.hasYouTubeCaptions = async function(videoId) {
+    try {
+      const captions = await getCaptionsFromPage(videoId);
+      return captions !== null;
+    } catch (error) {
+      return false;
     }
-    return false;
   };
   
   // Listen for messages from background.js
@@ -55,35 +108,26 @@
       const videoId = message.videoId;
       console.log('[YouTube Bridge] Caption request for:', videoId);
       
-      try {
-        // Try to get captions from page context
-        const captions = window.getYouTubeCaptions(videoId);
-        
-        if (captions) {
+      // Request captions from page context
+      getCaptionsFromPage(videoId)
+        .then(captions => {
           console.log('[YouTube Bridge] Captions found!');
           sendResponse({
             success: true,
             data: captions,
             videoId: videoId
           });
-        } else {
-          console.warn('[YouTube Bridge] No captions found for:', videoId);
+        })
+        .catch(error => {
+          console.warn('[YouTube Bridge] Failed to get captions:', error.message);
           sendResponse({
             success: false,
-            error: 'NO_CAPTIONS',
+            error: error.message,
             videoId: videoId
           });
-        }
-      } catch (error) {
-        console.error('[YouTube Bridge] Error getting captions:', error);
-        sendResponse({
-          success: false,
-          error: error.message,
-          videoId: videoId
         });
-      }
       
-      return false; // Synchronous response
+      return true; // Async response
     }
   });
   

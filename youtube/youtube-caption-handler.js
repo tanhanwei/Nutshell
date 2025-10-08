@@ -155,6 +155,26 @@
     console.log('[YouTube Handler] Cache cleared');
   };
   
+  // Listen for caption requests from content script (via postMessage)
+  window.addEventListener('message', (event) => {
+    // Only accept messages from same origin
+    if (event.source !== window) return;
+    
+    if (event.data.type === 'YT_GET_CAPTIONS') {
+      const { requestId, videoId } = event.data;
+      const captionData = captionCache.get(videoId);
+      
+      // Send response back
+      window.postMessage({
+        type: 'YT_CAPTIONS_RESPONSE',
+        requestId: requestId,
+        videoId: videoId,
+        success: !!captionData,
+        data: captionData || null
+      }, '*');
+    }
+  });
+  
   // Initialize interception
   setupInterception();
   

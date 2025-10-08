@@ -716,12 +716,17 @@
         reject(new Error('Timeout waiting for captions'));
       }, 5000); // 5 second timeout
       
-      // Check if captions already exist
-      if (window.hasYouTubeCaptions && window.hasYouTubeCaptions(videoId)) {
-        console.log('[YouTube] Captions already available for:', videoId);
-        clearTimeout(timeout);
-        resolve();
-        return;
+      // Check if captions already exist (async check)
+      if (window.hasYouTubeCaptions) {
+        window.hasYouTubeCaptions(videoId).then(hasCapt => {
+          if (hasCapt) {
+            console.log('[YouTube] Captions already available for:', videoId);
+            clearTimeout(timeout);
+            resolve();
+          }
+        }).catch(() => {
+          // Ignore error, will wait for event
+        });
       }
       
       // Listen for caption-ready event
