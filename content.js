@@ -295,7 +295,7 @@
       currentlyProcessingUrl = url; // Mark as processing
       
       currentHoverTimeout = setTimeout(() => {
-        handleYouTubeThumbnailHover(e.target, url);
+        handleYouTubeThumbnailHover(link, url);
       }, HOVER_DELAY);
       
       return; // Don't process as regular link
@@ -689,21 +689,25 @@
   /**
    * Handle YouTube thumbnail hover - extract video ID and request caption summary
    */
-  async function handleYouTubeThumbnailHover(element, url) {
+  async function handleYouTubeThumbnailHover(linkElement, url) {
     console.log('[YouTube] Thumbnail hover detected:', url);
     
     // Extract video ID
     const videoId = extractVideoId(url);
     if (!videoId) {
       console.warn('[YouTube] Could not extract video ID from:', url);
+      currentlyProcessingUrl = null; // Clear processing state
       return;
     }
     
     console.log('[YouTube] Video ID:', videoId);
     
+    // Store element for positioning
+    processingElement = linkElement;
+    
     // Show "Fetching captions..." in tooltip
     if (displayMode === 'tooltip' || displayMode === 'both') {
-      showTooltip('Fetching captions...', element);
+      showTooltip('Fetching captions...', linkElement);
     }
     
     // Send message to background to get caption summary
@@ -715,42 +719,63 @@
       }, (response) => {
         if (chrome.runtime.lastError) {
           console.error('[YouTube] Runtime error:', chrome.runtime.lastError);
-          showTooltip('Error: Extension context lost', element);
+          showTooltip('Error: Extension context lost', linkElement);
+          currentlyProcessingUrl = null;
           return;
         }
         
+        console.log('[YouTube] Response:', response);
+        
         if (response && response.status === 'complete') {
           // Display the summary
-          const formatted = formatAISummary(response.summary);
+          const summary = response.summary || 'No summary generated';
+          const formatted = formatAISummary(summary);
+          
+          console.log('[YouTube] Displaying summary, length:', summary.length);
+          
+          // Update state
+          currentlyDisplayedUrl = url;
+          displayTimes.set(url, Date.now());
           
           if (displayMode === 'tooltip' || displayMode === 'both') {
-            showTooltip(formatted, element);
+            showTooltip(formatted, linkElement);
           }
           
           if (displayMode === 'sidepanel' || displayMode === 'both') {
             // Send to side panel
             chrome.runtime.sendMessage({
               action: 'DISPLAY_CACHED_SUMMARY',
-              summary: response.summary,
+              summary: summary,
               url: url
             });
+          }
+          
+          // Clear processing state only for cached (instant) responses
+          if (response.cached) {
+            currentlyProcessingUrl = null;
           }
         } else if (response && response.status === 'streaming') {
           // Update tooltip with streaming content
           if (displayMode === 'tooltip' || displayMode === 'both') {
-            showTooltip('Generating summary...', element);
+            showTooltip('Generating summary...', linkElement);
           }
           // Streaming updates will come through runtime.onMessage listener
         } else if (response && response.error) {
           const errorMsg = response.error === 'NO_CAPTIONS' 
             ? 'No captions available for this video' 
             : `Error: ${response.error}`;
-          showTooltip(errorMsg, element);
+          showTooltip(errorMsg, linkElement);
+          currentlyProcessingUrl = null;
+        } else {
+          console.warn('[YouTube] Unexpected response:', response);
+          showTooltip('Error: Unexpected response', linkElement);
+          currentlyProcessingUrl = null;
         }
       });
     } catch (error) {
       console.error('[YouTube] Error requesting summary:', error);
-      showTooltip('Error fetching captions', element);
+      showTooltip('Error fetching captions', linkElement);
+      currentlyProcessingUrl = null;
     }
   }
   
