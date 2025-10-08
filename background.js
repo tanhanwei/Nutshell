@@ -248,12 +248,26 @@ async function useSummarizationAPI(text, signal, url) {
           console.log(`[Streaming] Progress: ${fullSummary.length} chars, Aborted: ${signal?.aborted}, URL match: ${url === lastProcessedUrl}`);
         }
         
-        // IMMEDIATELY check if aborted
+        // ✅ ENHANCED: Check abort BEFORE processing chunk
         if (signal && signal.aborted) {
-          console.log('[Background] 🔴 ABORT SIGNAL DETECTED IN STREAM!');
-          summarizer.destroy();
+          console.log('[Background] 🔴 ABORT SIGNAL DETECTED - stopping immediately');
+          
+          // Destroy session immediately
+          try {
+            summarizer.destroy();
+          } catch (e) {
+            console.log('[Background] Error destroying during abort:', e);
+          }
           currentSummarizerSession = null;
+          
+          // Throw to exit the async generator
           throw new DOMException('Aborted', 'AbortError');
+        }
+        
+        // ✅ ENHANCED: Also check if session was destroyed externally
+        if (!currentSummarizerSession) {
+          console.log('[Background] 🔴 SESSION DESTROYED - stopping stream');
+          throw new DOMException('Session destroyed', 'AbortError');
         }
         
         // Check if URL changed
@@ -394,12 +408,26 @@ async function usePromptAPI(text, signal, url) {
           console.log(`[Streaming] Progress: ${fullSummary.length} chars, Aborted: ${signal?.aborted}, URL match: ${url === lastProcessedUrl}`);
         }
         
-        // IMMEDIATELY check if aborted
+        // ✅ ENHANCED: Check abort BEFORE processing chunk
         if (signal && signal.aborted) {
-          console.log('[Background] 🔴 ABORT SIGNAL DETECTED IN STREAM!');
-          session.destroy();
+          console.log('[Background] 🔴 ABORT SIGNAL DETECTED - stopping immediately');
+          
+          // Destroy session immediately
+          try {
+            session.destroy();
+          } catch (e) {
+            console.log('[Background] Error destroying during abort:', e);
+          }
           currentPromptSession = null;
+          
+          // Throw to exit the async generator
           throw new DOMException('Aborted', 'AbortError');
+        }
+        
+        // ✅ ENHANCED: Also check if session was destroyed externally
+        if (!currentPromptSession) {
+          console.log('[Background] 🔴 SESSION DESTROYED - stopping stream');
+          throw new DOMException('Session destroyed', 'AbortError');
         }
         
         // Check if URL changed

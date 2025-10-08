@@ -338,17 +338,21 @@
           console.log(`[YouTube] Abort response:`, response);
         });
         
-        // Remove old overlay and clear states
+        // Remove old overlay
         if (currentYouTubeOverlay) {
           console.log(`[YouTube] Removing overlay for: ${currentYouTubeOverlayUrl}`);
           removeYouTubeOverlay(true);
+          currentYouTubeOverlay = null;
         }
         
-        // Clear all old states after sending abort
-        currentlyProcessingUrl = null;
-        currentYouTubeOverlay = null;
-        currentYouTubeOverlayUrl = null;
+        // ✅ FIX: Don't clear states here - let them get overwritten below
+        // This prevents the null state window
       }
+      
+      // ✅ FIX: Set new processing URL HERE (before timeout)
+      // This overwrites old state immediately, no gap
+      currentlyProcessingUrl = url;
+      currentYouTubeOverlayUrl = null; // Clear overlay URL since we're starting fresh
       
       // 2. Clear old hover timeout
       if (currentHoverTimeout) {
@@ -444,13 +448,12 @@
       if (isCurrentThumbnail && currentYouTubeOverlay) {
         console.log('[YouTube] Mouse left current thumbnail (has overlay), removing it');
         removeYouTubeOverlay();
-        // DON'T clear currentlyProcessingUrl or currentYouTubeOverlayUrl here!
-        // We need to keep them so that when hovering a NEW thumbnail, we can detect the switch
-        // and send the abort message. They will be cleared when a new hover is detected.
-        console.log('[YouTube] Keeping state for switch detection:', {
-          currentlyProcessingUrl,
-          currentYouTubeOverlayUrl
-        });
+        
+        // ✅ FIX: Clear BOTH states when overlay is removed
+        // This ensures next hover detects as fresh, not a switch
+        currentlyProcessingUrl = null;
+        currentYouTubeOverlayUrl = null;
+        console.log('[YouTube] Cleared state after removing overlay');
       } else {
         console.log('[YouTube] Mouse left thumbnail (no overlay here), ignoring');
       }
@@ -1130,9 +1133,11 @@
             });
           }
           
-          // Clear processing state after displaying summary
-          // For YouTube, we always clear since the overlay remains on screen
-          currentlyProcessingUrl = null;
+          // ✅ FIX: Don't clear state here - keep for switch detection
+          // Instead, update currentYouTubeOverlayUrl to track completed overlay
+          currentYouTubeOverlayUrl = url;
+          currentlyProcessingUrl = null; // Clear processing, but keep overlay URL
+          console.log('[YouTube] Summary complete, overlay active for:', url);
         } else if (response && response.status === 'streaming') {
           // Update overlay with streaming message
           updateYouTubeOverlay('🤖 Generating summary...', url);
