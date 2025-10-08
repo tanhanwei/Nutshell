@@ -651,26 +651,37 @@ async function handleYouTubeSummary(videoId, url) {
   console.log('[YouTube] Caption text length:', captionText.length);
   
   // Generate summary using the same logic as webpage summarization
-  const summaryPrompt = settings.usePromptAPI && settings.customPrompt
-    ? `${settings.customPrompt}\n\nVideo Transcript:\n${captionText}`
-    : captionText;
-  
-  // Use existing generateSummary function
-  const summary = await generateSummary(summaryPrompt, settings, null);
-  
-  // Cache the summary
-  youtubeSummaryCache.set(videoId, {
-    summary: summary,
-    timestamp: Date.now()
-  });
-  
-  return {
-    status: 'complete',
-    cached: false,
-    summary: summary,
-    videoId: videoId,
-    captionCount: captionArray.length
-  };
+  try {
+    // Create abort controller for this request
+    const abortController = new AbortController();
+    const signal = abortController.signal;
+    
+    // Use existing summarizeContent function
+    const summary = await summarizeContent(captionText, signal, url);
+    
+    // Cache the summary
+    youtubeSummaryCache.set(videoId, {
+      summary: summary,
+      timestamp: Date.now()
+    });
+    
+    console.log('[YouTube] Summary generated successfully');
+    
+    return {
+      status: 'complete',
+      cached: false,
+      summary: summary,
+      videoId: videoId,
+      captionCount: captionArray.length
+    };
+  } catch (error) {
+    console.error('[YouTube] Error generating summary:', error);
+    return {
+      status: 'error',
+      error: 'SUMMARY_FAILED',
+      message: error.message
+    };
+  }
 }
 
 // ========================================
