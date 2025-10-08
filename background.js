@@ -194,7 +194,6 @@ async function useSummarizationAPI(text, signal, url) {
     }
     
     const summarizer = await SummarizerAPI.summarizer.create(options);
-    currentSummarizerSession = summarizer;
     
     // Add abort listener to destroy session
     if (signal) {
@@ -224,26 +223,53 @@ async function useSummarizationAPI(text, signal, url) {
     }
     
     console.log('[Background] Starting Summarizer streaming...');
+    
+    // Store the summarizer instance globally BEFORE streaming
+    currentSummarizerSession = summarizer;
+    
+    // Check if already aborted before starting
+    if (signal && signal.aborted) {
+      console.log('[Background] Already aborted before streaming started');
+      summarizer.destroy();
+      currentSummarizerSession = null;
+      throw new DOMException('Aborted', 'AbortError');
+    }
+    
     const stream = summarizer.summarizeStreaming(processedText);
     
     let fullSummary = '';
     let lastBroadcast = 0;
-    const BROADCAST_INTERVAL = 150; // Only broadcast every 150ms
+    const BROADCAST_INTERVAL = 150;
     
     for await (const chunk of stream) {
+      // Check abort status FIRST
       if (signal && signal.aborted) {
-        console.log('[Background] Summarizer streaming aborted');
-        throw new DOMException('Aborted', 'AbortError');
+        console.log('[Background] Abort detected during streaming');
+        break; // Exit loop immediately
       }
       
       fullSummary += chunk;
       
-      // Throttle broadcasts to prevent flooding
       const now = Date.now();
       if (now - lastBroadcast >= BROADCAST_INTERVAL) {
+        // CRITICAL: Check if this URL is still the current one
+        if (url !== lastProcessedUrl) {
+          console.log('[Background] URL changed during streaming, stopping broadcasts');
+          break;
+        }
         broadcastStreamingUpdate(fullSummary, url);
         lastBroadcast = now;
       }
+    }
+    
+    // Cleanup after streaming
+    if (signal && signal.aborted) {
+      console.log('[Background] Destroying summarizer after abort');
+      if (currentSummarizerSession) {
+        currentSummarizerSession.destroy();
+        currentSummarizerSession = null;
+      }
+      throw new DOMException('Aborted', 'AbortError');
     }
     
     // Send final update
@@ -306,7 +332,6 @@ async function usePromptAPI(text, signal, url) {
       ],
       signal: signal  // Pass signal directly to create
     });
-    currentPromptSession = session;
     
     // Add abort listener to destroy session
     if (signal) {
@@ -338,26 +363,53 @@ async function usePromptAPI(text, signal, url) {
     const fullPrompt = `${settings.customPrompt}\n\nContent:\n${processedText}`;
     
     console.log('[Background] Starting Prompt API streaming...');
+    
+    // Store the session instance globally BEFORE streaming
+    currentPromptSession = session;
+    
+    // Check if already aborted before starting
+    if (signal && signal.aborted) {
+      console.log('[Background] Already aborted before streaming started');
+      session.destroy();
+      currentPromptSession = null;
+      throw new DOMException('Aborted', 'AbortError');
+    }
+    
     const stream = session.promptStreaming(fullPrompt);
     
     let fullSummary = '';
     let lastBroadcast = 0;
-    const BROADCAST_INTERVAL = 150; // Only broadcast every 150ms
+    const BROADCAST_INTERVAL = 150;
     
     for await (const chunk of stream) {
+      // Check abort status FIRST
       if (signal && signal.aborted) {
-        console.log('[Background] Prompt API streaming aborted');
-        throw new DOMException('Aborted', 'AbortError');
+        console.log('[Background] Abort detected during streaming');
+        break; // Exit loop immediately
       }
       
       fullSummary += chunk;
       
-      // Throttle broadcasts to prevent flooding
       const now = Date.now();
       if (now - lastBroadcast >= BROADCAST_INTERVAL) {
+        // CRITICAL: Check if this URL is still the current one
+        if (url !== lastProcessedUrl) {
+          console.log('[Background] URL changed during streaming, stopping broadcasts');
+          break;
+        }
         broadcastStreamingUpdate(fullSummary, url);
         lastBroadcast = now;
       }
+    }
+    
+    // Cleanup after streaming
+    if (signal && signal.aborted) {
+      console.log('[Background] Destroying prompt session after abort');
+      if (currentPromptSession) {
+        currentPromptSession.destroy();
+        currentPromptSession = null;
+      }
+      throw new DOMException('Aborted', 'AbortError');
     }
     
     // Send final update
@@ -644,7 +696,10 @@ function captionsToText(captions) {
  * Handle YouTube caption summarization
  */
 async function handleYouTubeSummary(videoId, url) {
-  console.log('[YouTube] Handling summary request for:', videoId);
+  console.log('[YouTube] YouTube summary request for:', videoId, 'URL:', url);
+  
+  // CRITICAL: Store this as the last processed URL globally
+  lastProcessedUrl = url;
   
   // CRITICAL: Cancel previous YouTube summary if different video
   if (currentYouTubeAbortController && currentYouTubeVideoId !== videoId) {
@@ -870,38 +925,43 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   
   // Handle YouTube summary abort request
   if (message.action === 'ABORT_YOUTUBE_SUMMARY') {
-    console.log('[Background] Received abort request for:', message.videoId);
+    const videoId = message.videoId;
+    console.log('[Background] ABORT received for video:', videoId);
     
-    // Abort the controller if it exists and matches
-    if (currentYouTubeAbortController && currentYouTubeVideoId === message.videoId) {
-      console.log('[Background] Aborting YouTube summary for:', message.videoId);
+    // Abort controller if exists
+    if (currentYouTubeAbortController) {
+      console.log('[Background] Aborting controller for:', currentYouTubeVideoId);
       currentYouTubeAbortController.abort();
       currentYouTubeAbortController = null;
       currentYouTubeVideoId = null;
     }
     
-    // Destroy any active AI sessions
+    // CRITICAL: Destroy any active sessions immediately
     if (currentSummarizerSession) {
+      console.log('[Background] Destroying summarizer session');
       try {
-        console.log('[Background] Destroying summarizer session due to abort');
         currentSummarizerSession.destroy();
       } catch (e) {
         console.log('[Background] Error destroying summarizer:', e);
       }
       currentSummarizerSession = null;
     }
+    
     if (currentPromptSession) {
+      console.log('[Background] Destroying prompt session');
       try {
-        console.log('[Background] Destroying prompt session due to abort');
         currentPromptSession.destroy();
       } catch (e) {
-        console.log('[Background] Error destroying prompt session:', e);
+        console.log('[Background] Error destroying prompt:', e);
       }
       currentPromptSession = null;
     }
     
+    // Clear the last processed URL to stop broadcasts
+    lastProcessedUrl = null;
+    
     sendResponse({ status: 'aborted' });
-    return true;
+    return false; // Synchronous response
   }
   
   // Handle YouTube summary request

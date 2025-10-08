@@ -310,37 +310,27 @@
         return;
       }
       
-    // CRITICAL: Cancel old processing BEFORE starting new one
-    
-    // 1. ALWAYS clear currentlyProcessingUrl when switching videos
-    // This prevents streaming updates from old video bleeding into new overlay
+    // CRITICAL: Send abort for old video BEFORE any UI changes
     if (currentlyProcessingUrl && currentlyProcessingUrl !== url) {
       const oldVideoId = extractVideoId(currentlyProcessingUrl);
-      console.log(`[YouTube] ⛔ CANCELING processing for: ${currentlyProcessingUrl} (videoId: ${oldVideoId})`);
-      console.log(`[YouTube] ✅ Starting new processing for: ${url}`);
+      console.log(`[YouTube] ⛔ ABORTING old video: ${oldVideoId}`);
       
-      // Send abort message to background to destroy AI sessions
-      if (oldVideoId) {
-        chrome.runtime.sendMessage({
-          action: 'ABORT_YOUTUBE_SUMMARY',
-          videoId: oldVideoId
-        }).catch(err => {
-          console.error('[YouTube] Failed to send abort:', err);
-        });
-      }
+      // Send abort immediately and don't wait for response
+      chrome.runtime.sendMessage({
+        action: 'ABORT_YOUTUBE_SUMMARY',
+        videoId: oldVideoId
+      }).catch(() => {});
       
+      // Clear processing URL immediately
       currentlyProcessingUrl = null;
     }
     
-    // 2. Remove ANY existing overlay (could be from completed summary or in-progress)
+    // Then remove overlay
     if (currentYouTubeOverlay) {
-      if (currentYouTubeOverlayUrl !== url) {
-        console.log(`[YouTube] Removing old overlay (was for: ${currentYouTubeOverlayUrl}, now hovering: ${url})`);
-        removeYouTubeOverlay(true); // Immediate removal - this clears the overlay content
-      } else {
-        console.log(`[YouTube] Already have overlay for this URL, refreshing...`);
-        removeYouTubeOverlay(true); // Remove and recreate - clears everything
-      }
+      console.log(`[YouTube] Removing overlay for: ${currentYouTubeOverlayUrl}`);
+      removeYouTubeOverlay(true);
+      currentYouTubeOverlay = null;
+      currentYouTubeOverlayUrl = null;
     }
       
       // 2. Clear old hover timeout
@@ -648,23 +638,20 @@
   // Listen for messages from background
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'STREAMING_UPDATE') {
-      // CRITICAL: Check both processing URL AND overlay URL
-      const isValidUpdate = message.url === currentlyProcessingUrl || 
-                            message.url === currentYouTubeOverlayUrl;
+      // Only accept updates for the EXACT URL we're currently processing
+      const isValid = (message.url === currentlyProcessingUrl) || 
+                      (message.url === currentYouTubeOverlayUrl && currentYouTubeOverlay);
       
-      if (!isValidUpdate) {
-        const shortUrl = getShortUrl(message.url);
-        debugLog(`⚠️ STALE STREAM UPDATE: "${shortUrl}" (ignoring, current: "${currentlyProcessingUrl ? getShortUrl(currentlyProcessingUrl) : 'none'}")`);
+      if (!isValid) {
+        console.log(`[YouTube] REJECTED stale update for: ${message.url}`);
+        console.log(`  Currently processing: ${currentlyProcessingUrl}`);
+        console.log(`  Overlay URL: ${currentYouTubeOverlayUrl}`);
         return;
       }
       
-      // Check if we're showing YouTube overlay or regular tooltip
-      if (IS_YOUTUBE && currentYouTubeOverlay && currentYouTubeOverlayUrl === message.url) {
-        // Update YouTube overlay with streaming content
-        // Note: content is already formatted as HTML by background.js
+      if (IS_YOUTUBE && currentYouTubeOverlay) {
         updateYouTubeOverlay(message.content, message.url);
-      } else if (message.url === currentlyProcessingUrl) {
-        // Update regular tooltip
+      } else {
         updateTooltipContent(message.content, message.url);
       }
     }
