@@ -300,6 +300,13 @@
     - New URL: ${url}
     - URLs match: ${currentlyProcessingUrl === url || currentYouTubeOverlayUrl === url}`);
       
+      // ✅ FIX: Prevent re-hovering the same video
+      const isSameVideo = (currentlyProcessingUrl === url) || (currentYouTubeOverlayUrl === url);
+      if (isSameVideo) {
+        console.log('[YouTube] ⏭️  Already processing/displaying this video, ignoring re-hover');
+        return;
+      }
+      
       // Find ONLY the thumbnail element (not the entire video card)
       // This ensures consistent sizing - overlay covers only thumbnail, not title/channel
       let thumbnailElement = e.target.closest('ytd-thumbnail');
@@ -1061,6 +1068,18 @@
     }
     
     console.log('[YouTube] Overlay created for:', url);
+    
+    // ✅ FIX: Add mouseout handler to overlay to detect when user leaves
+    currentYouTubeOverlay.addEventListener('mouseout', (e) => {
+      // Only trigger if actually leaving the overlay (not moving to child elements)
+      if (!currentYouTubeOverlay.contains(e.relatedTarget)) {
+        console.log('[YouTube] Mouse left overlay, removing it');
+        removeYouTubeOverlay();
+        currentlyProcessingUrl = null;
+        currentYouTubeOverlayUrl = null;
+        console.log('[YouTube] Cleared state after leaving overlay');
+      }
+    });
     
     // Show initial loading message
     updateYouTubeOverlay('⏳ Waiting for captions to load...', url);
