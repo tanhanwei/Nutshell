@@ -332,6 +332,27 @@
     const url = link.href;
     const shortUrl = getShortUrl(url);
     
+    // Handle YouTube thumbnail mouseout
+    if (IS_YOUTUBE && isYouTubeThumbnail(e.target)) {
+      const relatedTarget = e.relatedTarget;
+      
+      // Check if moving into the overlay itself
+      if (currentYouTubeOverlay && relatedTarget) {
+        const { overlay } = currentYouTubeOverlay;
+        if (overlay.contains(relatedTarget) || overlay === relatedTarget) {
+          console.log('[YouTube] Mouse moved into overlay, keeping it visible');
+          return;
+        }
+      }
+      
+      // Otherwise, remove the overlay
+      console.log('[YouTube] Mouse left thumbnail, removing overlay');
+      removeYouTubeOverlay();
+      currentlyProcessingUrl = null;
+      clearTimeout(currentHoverTimeout);
+      return;
+    }
+    
     // Check if we're actually leaving the link (not just moving to a child element or tooltip)
     const relatedTarget = e.relatedTarget;
     if (relatedTarget) {
@@ -638,6 +659,133 @@
   
   // ============ YouTube-Specific Functions ============
   
+  let currentYouTubeOverlay = null; // Track active overlay
+  
+  /**
+   * Create YouTube summary overlay inside thumbnail
+   */
+  function createYouTubeOverlay(thumbnailElement) {
+    // Find the thumbnail container
+    const container = thumbnailElement.closest('ytd-thumbnail') || 
+                     thumbnailElement.closest('ytd-rich-item-renderer') ||
+                     thumbnailElement.closest('ytd-compact-video-renderer');
+    
+    if (!container) {
+      console.warn('[YouTube] Could not find thumbnail container');
+      return null;
+    }
+    
+    // Create overlay container
+    const overlay = document.createElement('div');
+    overlay.className = 'yt-summary-overlay';
+    overlay.style.cssText = `
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.85);
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      padding: 12px;
+      box-sizing: border-box;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+      pointer-events: auto;
+    `;
+    
+    // Create scrollable content area
+    const contentArea = document.createElement('div');
+    contentArea.className = 'yt-summary-content';
+    contentArea.style.cssText = `
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: hidden;
+      color: #fff;
+      font-size: 13px;
+      line-height: 1.5;
+      padding-right: 8px;
+    `;
+    
+    // Custom scrollbar styling
+    const style = document.createElement('style');
+    style.textContent = `
+      .yt-summary-content::-webkit-scrollbar {
+        width: 6px;
+      }
+      .yt-summary-content::-webkit-scrollbar-track {
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 3px;
+      }
+      .yt-summary-content::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.3);
+        border-radius: 3px;
+      }
+      .yt-summary-content::-webkit-scrollbar-thumb:hover {
+        background: rgba(255, 255, 255, 0.5);
+      }
+      .yt-summary-content ul {
+        margin: 8px 0;
+        padding-left: 20px;
+        list-style-type: disc;
+      }
+      .yt-summary-content li {
+        margin-bottom: 6px;
+      }
+      .yt-summary-content strong {
+        font-weight: 600;
+        color: #fff;
+      }
+      .yt-summary-content p {
+        margin: 8px 0;
+      }
+    `;
+    document.head.appendChild(style);
+    
+    overlay.appendChild(contentArea);
+    
+    // Make container position relative if not already
+    const containerStyle = window.getComputedStyle(container);
+    if (containerStyle.position === 'static') {
+      container.style.position = 'relative';
+    }
+    
+    container.appendChild(overlay);
+    
+    // Fade in
+    setTimeout(() => {
+      overlay.style.opacity = '1';
+    }, 10);
+    
+    return { overlay, contentArea };
+  }
+  
+  /**
+   * Remove YouTube overlay
+   */
+  function removeYouTubeOverlay() {
+    if (currentYouTubeOverlay) {
+      const { overlay } = currentYouTubeOverlay;
+      overlay.style.opacity = '0';
+      setTimeout(() => {
+        if (overlay.parentNode) {
+          overlay.parentNode.removeChild(overlay);
+        }
+      }, 300);
+      currentYouTubeOverlay = null;
+    }
+  }
+  
+  /**
+   * Update YouTube overlay content
+   */
+  function updateYouTubeOverlay(content) {
+    if (currentYouTubeOverlay) {
+      currentYouTubeOverlay.contentArea.innerHTML = content;
+    }
+  }
+  
   /**
    * Extract video ID from a YouTube URL
    */
@@ -705,10 +853,19 @@
     // Store element for positioning
     processingElement = linkElement;
     
-    // Show "Waiting for captions..." in tooltip
-    if (displayMode === 'tooltip' || displayMode === 'both') {
-      showTooltip(linkElement, 'Waiting for captions to load...', url);
+    // Create YouTube overlay (instead of tooltip)
+    currentYouTubeOverlay = createYouTubeOverlay(linkElement);
+    
+    if (!currentYouTubeOverlay) {
+      console.warn('[YouTube] Failed to create overlay, falling back to tooltip');
+      if (displayMode === 'tooltip' || displayMode === 'both') {
+        showTooltip(linkElement, 'Waiting for captions to load...', url);
+      }
+      return;
     }
+    
+    // Show initial loading message
+    updateYouTubeOverlay('⏳ Waiting for captions to load...');
     
     // Wait for captions to be captured (with timeout)
     const waitForCaptions = new Promise((resolve, reject) => {
@@ -747,13 +904,12 @@
       await waitForCaptions;
       console.log('[YouTube] Captions confirmed ready, requesting summary...');
       
-      // Update tooltip
-      if (displayMode === 'tooltip' || displayMode === 'both') {
-        showTooltip(linkElement, 'Generating summary...', url);
-      }
+      // Update overlay
+      updateYouTubeOverlay('🤖 Generating summary...');
     } catch (error) {
       console.warn('[YouTube] Timeout or error waiting for captions:', error);
-      showTooltip(linkElement, 'Captions not available (video preview may not have loaded)', url);
+      updateYouTubeOverlay('⚠️ Captions not available (video preview may not have loaded)');
+      setTimeout(removeYouTubeOverlay, 3000); // Auto-remove after 3 seconds
       currentlyProcessingUrl = null;
       return;
     }
@@ -767,7 +923,8 @@
       }, (response) => {
         if (chrome.runtime.lastError) {
           console.error('[YouTube] Runtime error:', chrome.runtime.lastError);
-          showTooltip(linkElement, 'Error: Extension context lost', url);
+          updateYouTubeOverlay('❌ Error: Extension context lost');
+          setTimeout(removeYouTubeOverlay, 3000);
           currentlyProcessingUrl = null;
           return;
         }
@@ -785,12 +942,11 @@
           currentlyDisplayedUrl = url;
           displayTimes.set(url, Date.now());
           
-          if (displayMode === 'tooltip' || displayMode === 'both') {
-            showTooltip(linkElement, formatted, url);
-          }
+          // Show summary in overlay
+          updateYouTubeOverlay(formatted);
           
+          // Also send to side panel if enabled
           if (displayMode === 'sidepanel' || displayMode === 'both') {
-            // Send to side panel
             chrome.runtime.sendMessage({
               action: 'DISPLAY_CACHED_SUMMARY',
               summary: summary,
@@ -803,26 +959,27 @@
             currentlyProcessingUrl = null;
           }
         } else if (response && response.status === 'streaming') {
-          // Update tooltip with streaming content
-          if (displayMode === 'tooltip' || displayMode === 'both') {
-            showTooltip(linkElement, 'Generating summary...', url);
-          }
+          // Update overlay with streaming message
+          updateYouTubeOverlay('🤖 Generating summary...');
           // Streaming updates will come through runtime.onMessage listener
         } else if (response && response.error) {
           const errorMsg = response.error === 'NO_CAPTIONS' 
-            ? 'No captions available for this video' 
-            : `Error: ${response.error}`;
-          showTooltip(linkElement, errorMsg, url);
+            ? '⚠️ No captions available for this video' 
+            : `❌ Error: ${response.error}`;
+          updateYouTubeOverlay(errorMsg);
+          setTimeout(removeYouTubeOverlay, 3000);
           currentlyProcessingUrl = null;
         } else {
           console.warn('[YouTube] Unexpected response:', response);
-          showTooltip(linkElement, 'Error: Unexpected response', url);
+          updateYouTubeOverlay('❌ Error: Unexpected response');
+          setTimeout(removeYouTubeOverlay, 3000);
           currentlyProcessingUrl = null;
         }
       });
     } catch (error) {
       console.error('[YouTube] Error requesting summary:', error);
-      showTooltip(linkElement, 'Error fetching captions', url);
+      updateYouTubeOverlay('❌ Error fetching captions');
+      setTimeout(removeYouTubeOverlay, 3000);
       currentlyProcessingUrl = null;
     }
   }
