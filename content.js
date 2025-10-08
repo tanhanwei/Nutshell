@@ -579,7 +579,16 @@
     if (message.type === 'STREAMING_UPDATE') {
       // Only update if this is for the URL we're currently processing
       if (message.url === currentlyProcessingUrl) {
-        updateTooltipContent(message.content, message.url);
+        // Check if we're showing YouTube overlay or regular tooltip
+        if (IS_YOUTUBE && currentYouTubeOverlay) {
+          // Update YouTube overlay with streaming content
+          const formatted = formatAISummary(message.content);
+          updateYouTubeOverlay(formatted, message.url);
+          console.log('[YouTube] Streaming update received, overlay updated');
+        } else {
+          // Update regular tooltip
+          updateTooltipContent(message.content, message.url);
+        }
       } else {
         const shortUrl = getShortUrl(message.url);
         debugLog(`⚠️ STALE STREAM UPDATE: "${shortUrl}" (ignoring, current: "${currentlyProcessingUrl ? getShortUrl(currentlyProcessingUrl) : 'none'}")`);
@@ -680,6 +689,7 @@
   // ============ YouTube-Specific Functions ============
   
   let currentYouTubeOverlay = null; // Track active overlay
+  let currentYouTubeOverlayUrl = null; // Track which URL the overlay is for
   
   /**
    * Create YouTube summary overlay inside thumbnail
@@ -792,15 +802,22 @@
         }
       }, 300);
       currentYouTubeOverlay = null;
+      currentYouTubeOverlayUrl = null;
+      console.log('[YouTube] Overlay removed');
     }
   }
   
   /**
-   * Update YouTube overlay content
+   * Update YouTube overlay content (only if it's for the right URL)
    */
-  function updateYouTubeOverlay(content) {
+  function updateYouTubeOverlay(content, forUrl) {
     if (currentYouTubeOverlay) {
-      currentYouTubeOverlay.contentArea.innerHTML = content;
+      // Only update if this is for the current overlay's URL (prevent stale updates)
+      if (!forUrl || currentYouTubeOverlayUrl === forUrl) {
+        currentYouTubeOverlay.contentArea.innerHTML = content;
+      } else {
+        console.log(`[YouTube] Ignoring update for ${forUrl}, current overlay is for ${currentYouTubeOverlayUrl}`);
+      }
     }
   }
   
@@ -871,8 +888,12 @@
     // Store element for positioning
     processingElement = linkElement;
     
+    // Remove any existing overlay first (critical for switching between thumbnails)
+    removeYouTubeOverlay();
+    
     // Create YouTube overlay (pass the thumbnail container)
     currentYouTubeOverlay = createYouTubeOverlay(thumbnailElement);
+    currentYouTubeOverlayUrl = url; // Track which URL this overlay is for
     
     if (!currentYouTubeOverlay) {
       console.warn('[YouTube] Failed to create overlay, falling back to tooltip');
@@ -882,8 +903,10 @@
       return;
     }
     
+    console.log('[YouTube] Overlay created for:', url);
+    
     // Show initial loading message
-    updateYouTubeOverlay('⏳ Waiting for captions to load...');
+    updateYouTubeOverlay('⏳ Waiting for captions to load...', url);
     
     // Wait for captions to be captured (with timeout)
     const waitForCaptions = new Promise((resolve, reject) => {
@@ -923,10 +946,10 @@
       console.log('[YouTube] Captions confirmed ready, requesting summary...');
       
       // Update overlay
-      updateYouTubeOverlay('🤖 Generating summary...');
+      updateYouTubeOverlay('🤖 Generating summary...', url);
     } catch (error) {
       console.warn('[YouTube] Timeout or error waiting for captions:', error);
-      updateYouTubeOverlay('⚠️ Captions not available (video preview may not have loaded)');
+      updateYouTubeOverlay('⚠️ Captions not available (video preview may not have loaded)', url);
       setTimeout(removeYouTubeOverlay, 3000); // Auto-remove after 3 seconds
       currentlyProcessingUrl = null;
       return;
@@ -941,7 +964,7 @@
       }, (response) => {
         if (chrome.runtime.lastError) {
           console.error('[YouTube] Runtime error:', chrome.runtime.lastError);
-          updateYouTubeOverlay('❌ Error: Extension context lost');
+          updateYouTubeOverlay('❌ Error: Extension context lost', url);
           setTimeout(removeYouTubeOverlay, 3000);
           currentlyProcessingUrl = null;
           return;
@@ -961,7 +984,7 @@
           displayTimes.set(url, Date.now());
           
           // Show summary in overlay
-          updateYouTubeOverlay(formatted);
+          updateYouTubeOverlay(formatted, url);
           
           // Also send to side panel if enabled
           if (displayMode === 'sidepanel' || displayMode === 'both') {
@@ -972,31 +995,30 @@
             });
           }
           
-          // Clear processing state only for cached (instant) responses
-          if (response.cached) {
-            currentlyProcessingUrl = null;
-          }
+          // Clear processing state after displaying summary
+          currentlyProcessingUrl = null;
         } else if (response && response.status === 'streaming') {
           // Update overlay with streaming message
-          updateYouTubeOverlay('🤖 Generating summary...');
+          updateYouTubeOverlay('🤖 Generating summary...', url);
           // Streaming updates will come through runtime.onMessage listener
+          // Keep currentlyProcessingUrl set so streaming updates work
         } else if (response && response.error) {
           const errorMsg = response.error === 'NO_CAPTIONS' 
             ? '⚠️ No captions available for this video' 
             : `❌ Error: ${response.error}`;
-          updateYouTubeOverlay(errorMsg);
+          updateYouTubeOverlay(errorMsg, url);
           setTimeout(removeYouTubeOverlay, 3000);
           currentlyProcessingUrl = null;
         } else {
           console.warn('[YouTube] Unexpected response:', response);
-          updateYouTubeOverlay('❌ Error: Unexpected response');
+          updateYouTubeOverlay('❌ Error: Unexpected response', url);
           setTimeout(removeYouTubeOverlay, 3000);
           currentlyProcessingUrl = null;
         }
       });
     } catch (error) {
       console.error('[YouTube] Error requesting summary:', error);
-      updateYouTubeOverlay('❌ Error fetching captions');
+      updateYouTubeOverlay('❌ Error fetching captions', url);
       setTimeout(removeYouTubeOverlay, 3000);
       currentlyProcessingUrl = null;
     }
