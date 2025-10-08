@@ -338,14 +338,14 @@
           console.log(`[YouTube] Abort response:`, response);
         });
         
-        // Clear states immediately
+        // Remove old overlay and clear states
+        if (currentYouTubeOverlay) {
+          console.log(`[YouTube] Removing overlay for: ${currentYouTubeOverlayUrl}`);
+          removeYouTubeOverlay(true);
+        }
+        
+        // Clear all old states after sending abort
         currentlyProcessingUrl = null;
-      }
-      
-      // Then remove overlay
-      if (currentYouTubeOverlay) {
-        console.log(`[YouTube] Removing overlay for: ${currentYouTubeOverlayUrl}`);
-        removeYouTubeOverlay(true);
         currentYouTubeOverlay = null;
         currentYouTubeOverlayUrl = null;
       }
@@ -444,7 +444,13 @@
       if (isCurrentThumbnail && currentYouTubeOverlay) {
         console.log('[YouTube] Mouse left current thumbnail (has overlay), removing it');
         removeYouTubeOverlay();
-        currentlyProcessingUrl = null;
+        // DON'T clear currentlyProcessingUrl or currentYouTubeOverlayUrl here!
+        // We need to keep them so that when hovering a NEW thumbnail, we can detect the switch
+        // and send the abort message. They will be cleared when a new hover is detected.
+        console.log('[YouTube] Keeping state for switch detection:', {
+          currentlyProcessingUrl,
+          currentYouTubeOverlayUrl
+        });
       } else {
         console.log('[YouTube] Mouse left thumbnail (no overlay here), ignoring');
       }
