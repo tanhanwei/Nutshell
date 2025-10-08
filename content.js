@@ -284,19 +284,14 @@
     if (IS_YOUTUBE && isYouTubeThumbnail(e.target)) {
       console.log(`🎬 YOUTUBE THUMBNAIL: "${shortUrl}" (will trigger in ${HOVER_DELAY}ms)`);
       
-      // Find the thumbnail container element
-      const thumbnailSelectors = [
-        'ytd-thumbnail',
-        'ytd-rich-item-renderer',
-        'ytd-compact-video-renderer',
-        'ytd-video-preview',
-        'ytd-playlist-thumbnail'
-      ];
+      // Find ONLY the thumbnail element (not the entire video card)
+      // This ensures consistent sizing - overlay covers only thumbnail, not title/channel
+      let thumbnailElement = e.target.closest('ytd-thumbnail');
       
-      let thumbnailElement = null;
-      for (const selector of thumbnailSelectors) {
-        thumbnailElement = e.target.closest(selector);
-        if (thumbnailElement) break;
+      // If not found, try alternative thumbnail containers
+      if (!thumbnailElement) {
+        thumbnailElement = e.target.closest('ytd-video-preview') || 
+                          e.target.closest('ytd-playlist-thumbnail');
       }
       
       if (!thumbnailElement) {
@@ -582,8 +577,8 @@
         // Check if we're showing YouTube overlay or regular tooltip
         if (IS_YOUTUBE && currentYouTubeOverlay) {
           // Update YouTube overlay with streaming content
-          const formatted = formatAISummary(message.content);
-          updateYouTubeOverlay(formatted, message.url);
+          // Note: content is already formatted as HTML by background.js
+          updateYouTubeOverlay(message.content, message.url);
           console.log('[YouTube] Streaming update received, overlay updated');
         } else {
           // Update regular tooltip
@@ -851,10 +846,10 @@
   function isYouTubeThumbnail(element) {
     if (!IS_YOUTUBE) return false;
     
+    // Only check for actual thumbnail elements, not entire video cards
+    // This ensures consistent overlay sizing
     const thumbnailSelectors = [
       'ytd-thumbnail',
-      'ytd-rich-item-renderer',
-      'ytd-compact-video-renderer',
       'ytd-video-preview',
       'ytd-playlist-thumbnail',
       'a#thumbnail'
