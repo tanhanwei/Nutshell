@@ -398,17 +398,6 @@
       console.log('[YouTube] Mouseout detected from thumbnail, url:', url);
       console.log('[YouTube] currentlyProcessingUrl:', currentlyProcessingUrl);
       
-      const relatedTarget = e.relatedTarget;
-      
-      // Check if moving into the overlay itself
-      if (currentYouTubeOverlay && relatedTarget) {
-        const { overlay } = currentYouTubeOverlay;
-        if (overlay.contains(relatedTarget) || overlay === relatedTarget) {
-          console.log('[YouTube] Mouse moved into overlay, keeping it visible');
-          return;
-        }
-      }
-      
       // Cancel this URL's pending hover timeout (if any)
       const pendingTimeout = hoverTimeouts.get(url);
       if (pendingTimeout) {
@@ -416,6 +405,10 @@
         clearTimeout(pendingTimeout);
         hoverTimeouts.delete(url);
       }
+      
+      // Note: With pointer-events: none on overlay, mouseout fires when leaving thumbnail
+      // even if mouse is still over the overlay content area (which has pointer-events: auto)
+      // This is actually what we want - allows hovering other thumbnails!
       
       // Remove overlay if this thumbnail currently has it displayed
       // Check BOTH currentlyProcessingUrl (for in-progress) AND currentYouTubeOverlayUrl (for completed)
@@ -782,7 +775,7 @@
       box-sizing: border-box;
       opacity: 0;
       transition: opacity 0.3s ease;
-      pointer-events: auto;
+      pointer-events: none;
     `;
     
     // Create scrollable content area
@@ -796,6 +789,7 @@
       font-size: 13px;
       line-height: 1.5;
       padding-right: 8px;
+      pointer-events: auto;
     `;
     
     // Custom scrollbar styling
