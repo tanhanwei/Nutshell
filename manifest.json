@@ -33,7 +33,7 @@
     "default_title": "Open Hover Preview Panel"
   },
   "web_accessible_resources": [{
-    "resources": ["lib/Readability.js"],
+    "resources": ["lib/Readability.js", "youtube/youtube-inject-page.js"],
     "matches": ["<all_urls>"]
   }]
 }
