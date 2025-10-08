@@ -705,12 +705,55 @@
     // Store element for positioning
     processingElement = linkElement;
     
-    // Show "Fetching captions..." in tooltip
+    // Show "Waiting for captions..." in tooltip
     if (displayMode === 'tooltip' || displayMode === 'both') {
-      showTooltip(linkElement, 'Fetching captions...', url);
+      showTooltip(linkElement, 'Waiting for captions to load...', url);
     }
     
-    // Send message to background to get caption summary
+    // Wait for captions to be captured (with timeout)
+    const waitForCaptions = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Timeout waiting for captions'));
+      }, 5000); // 5 second timeout
+      
+      // Check if captions already exist
+      if (window.hasYouTubeCaptions && window.hasYouTubeCaptions(videoId)) {
+        console.log('[YouTube] Captions already available for:', videoId);
+        clearTimeout(timeout);
+        resolve();
+        return;
+      }
+      
+      // Listen for caption-ready event
+      const captionListener = (event) => {
+        if (event.detail && event.detail.videoId === videoId) {
+          console.log('[YouTube] Captions ready event received for:', videoId);
+          clearTimeout(timeout);
+          window.removeEventListener('youtube-captions-ready', captionListener);
+          resolve();
+        }
+      };
+      
+      window.addEventListener('youtube-captions-ready', captionListener);
+    });
+    
+    try {
+      // Wait for captions to be ready
+      await waitForCaptions;
+      console.log('[YouTube] Captions confirmed ready, requesting summary...');
+      
+      // Update tooltip
+      if (displayMode === 'tooltip' || displayMode === 'both') {
+        showTooltip(linkElement, 'Generating summary...', url);
+      }
+    } catch (error) {
+      console.warn('[YouTube] Timeout or error waiting for captions:', error);
+      showTooltip(linkElement, 'Captions not available (video preview may not have loaded)', url);
+      currentlyProcessingUrl = null;
+      return;
+    }
+    
+    // Now request the summary (captions are ready)
     try {
       chrome.runtime.sendMessage({
         action: 'GET_YOUTUBE_SUMMARY',
