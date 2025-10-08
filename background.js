@@ -125,6 +125,10 @@ let lastProcessedUrl = null;
 let currentYouTubeAbortController = null;
 let currentYouTubeVideoId = null;
 
+// Session tracking for proper cleanup
+let currentSummarizerSession = null;
+let currentPromptSession = null;
+
 // Clean cache periodically
 setInterval(() => {
   const now = Date.now();
@@ -176,7 +180,32 @@ async function useSummarizationAPI(text, signal, url) {
       outputLanguage: 'en'
     };
     
+    // Destroy any existing summarizer session
+    if (currentSummarizerSession) {
+      try {
+        if (currentSummarizerSession.destroy) {
+          console.log('[Background] Destroying old summarizer session');
+          currentSummarizerSession.destroy();
+        }
+      } catch (e) {
+        console.log('[Background] Error destroying old summarizer:', e);
+      }
+      currentSummarizerSession = null;
+    }
+    
     const summarizer = await SummarizerAPI.summarizer.create(options);
+    currentSummarizerSession = summarizer;
+    
+    // Add abort listener to destroy session
+    if (signal) {
+      signal.addEventListener('abort', () => {
+        console.log('[Background] Abort signal received - destroying summarizer');
+        if (summarizer && summarizer.destroy) {
+          summarizer.destroy();
+        }
+        currentSummarizerSession = null;
+      });
+    }
     
     // Prepare text
     const MAX_CHARS = 4000;
@@ -229,7 +258,13 @@ async function useSummarizationAPI(text, signal, url) {
     return fullSummary;
     
   } catch (error) {
+    if (error.name === 'AbortError' || error.message === 'Session is destroyed') {
+      console.log('[Background] Summarizer aborted/destroyed');
+      currentSummarizerSession = null;
+      throw error;
+    }
     console.error('[Background] Summarization failed:', error);
+    currentSummarizerSession = null;
     throw error;
   }
 }
@@ -254,11 +289,35 @@ async function usePromptAPI(text, signal, url) {
   }
   
   try {
+    // Destroy any existing prompt session
+    if (currentPromptSession) {
+      try {
+        console.log('[Background] Destroying old prompt session');
+        currentPromptSession.destroy();
+      } catch (e) {
+        console.log('[Background] Error destroying old prompt session:', e);
+      }
+      currentPromptSession = null;
+    }
+    
     const session = await SummarizerAPI.promptAPI.create({
       expectedOutputs: [
         { type: 'text', languages: ['en'] }
-      ]
+      ],
+      signal: signal  // Pass signal directly to create
     });
+    currentPromptSession = session;
+    
+    // Add abort listener to destroy session
+    if (signal) {
+      signal.addEventListener('abort', () => {
+        console.log('[Background] Abort signal received - destroying prompt session');
+        if (session) {
+          session.destroy();
+        }
+        currentPromptSession = null;
+      });
+    }
     
     // Prepare text
     const MAX_CHARS = 3000;
@@ -313,7 +372,13 @@ async function usePromptAPI(text, signal, url) {
     return fullSummary;
     
   } catch (error) {
+    if (error.name === 'AbortError' || error.message === 'Session is destroyed') {
+      console.log('[Background] Prompt API aborted/destroyed');
+      currentPromptSession = null;
+      throw error;
+    }
     console.error('[Background] Prompt API failed:', error);
+    currentPromptSession = null;
     throw error;
   }
 }
@@ -801,6 +866,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     
     return true; // Keep channel open for async response
+  }
+  
+  // Handle YouTube summary abort request
+  if (message.action === 'ABORT_YOUTUBE_SUMMARY') {
+    console.log('[Background] Received abort request for:', message.videoId);
+    
+    // Abort the controller if it exists and matches
+    if (currentYouTubeAbortController && currentYouTubeVideoId === message.videoId) {
+      console.log('[Background] Aborting YouTube summary for:', message.videoId);
+      currentYouTubeAbortController.abort();
+      currentYouTubeAbortController = null;
+      currentYouTubeVideoId = null;
+    }
+    
+    // Destroy any active AI sessions
+    if (currentSummarizerSession) {
+      try {
+        console.log('[Background] Destroying summarizer session due to abort');
+        currentSummarizerSession.destroy();
+      } catch (e) {
+        console.log('[Background] Error destroying summarizer:', e);
+      }
+      currentSummarizerSession = null;
+    }
+    if (currentPromptSession) {
+      try {
+        console.log('[Background] Destroying prompt session due to abort');
+        currentPromptSession.destroy();
+      } catch (e) {
+        console.log('[Background] Error destroying prompt session:', e);
+      }
+      currentPromptSession = null;
+    }
+    
+    sendResponse({ status: 'aborted' });
+    return true;
   }
   
   // Handle YouTube summary request

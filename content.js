@@ -315,13 +315,21 @@
     // 1. ALWAYS clear currentlyProcessingUrl when switching videos
     // This prevents streaming updates from old video bleeding into new overlay
     if (currentlyProcessingUrl && currentlyProcessingUrl !== url) {
-      console.log(`[YouTube] ⛔ CANCELING processing for: ${currentlyProcessingUrl}`);
+      const oldVideoId = extractVideoId(currentlyProcessingUrl);
+      console.log(`[YouTube] ⛔ CANCELING processing for: ${currentlyProcessingUrl} (videoId: ${oldVideoId})`);
       console.log(`[YouTube] ✅ Starting new processing for: ${url}`);
-      currentlyProcessingUrl = null;
       
-      // Note: The actual abort happens in background.js when we send GET_YOUTUBE_SUMMARY
-      // for the new videoId. Background.js will check currentYouTubeVideoId and abort
-      // any ongoing summarization for a different video.
+      // Send abort message to background to destroy AI sessions
+      if (oldVideoId) {
+        chrome.runtime.sendMessage({
+          action: 'ABORT_YOUTUBE_SUMMARY',
+          videoId: oldVideoId
+        }).catch(err => {
+          console.error('[YouTube] Failed to send abort:', err);
+        });
+      }
+      
+      currentlyProcessingUrl = null;
     }
     
     // 2. Remove ANY existing overlay (could be from completed summary or in-progress)
@@ -640,27 +648,24 @@
   // Listen for messages from background
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'STREAMING_UPDATE') {
-      // Only update if this is for the URL we're currently processing
-      if (message.url === currentlyProcessingUrl) {
-        // Check if we're showing YouTube overlay or regular tooltip
-        if (IS_YOUTUBE && currentYouTubeOverlay) {
-          // ADDITIONAL SAFEGUARD: Verify overlay URL matches message URL
-          // This prevents streaming from Video A appearing in Video B's overlay
-          if (currentYouTubeOverlayUrl === message.url) {
-            // Update YouTube overlay with streaming content
-            // Note: content is already formatted as HTML by background.js
-            updateYouTubeOverlay(message.content, message.url);
-            // Streaming log is too noisy, skip it (updateYouTubeOverlay logs final result)
-          } else {
-            console.warn(`[YouTube] Rejecting stream update: overlay is for ${currentYouTubeOverlayUrl}, update is for ${message.url}`);
-          }
-        } else {
-          // Update regular tooltip
-          updateTooltipContent(message.content, message.url);
-        }
-      } else {
+      // CRITICAL: Check both processing URL AND overlay URL
+      const isValidUpdate = message.url === currentlyProcessingUrl || 
+                            message.url === currentYouTubeOverlayUrl;
+      
+      if (!isValidUpdate) {
         const shortUrl = getShortUrl(message.url);
         debugLog(`⚠️ STALE STREAM UPDATE: "${shortUrl}" (ignoring, current: "${currentlyProcessingUrl ? getShortUrl(currentlyProcessingUrl) : 'none'}")`);
+        return;
+      }
+      
+      // Check if we're showing YouTube overlay or regular tooltip
+      if (IS_YOUTUBE && currentYouTubeOverlay && currentYouTubeOverlayUrl === message.url) {
+        // Update YouTube overlay with streaming content
+        // Note: content is already formatted as HTML by background.js
+        updateYouTubeOverlay(message.content, message.url);
+      } else if (message.url === currentlyProcessingUrl) {
+        // Update regular tooltip
+        updateTooltipContent(message.content, message.url);
       }
     }
     
@@ -991,6 +996,22 @@
     // Store element for positioning
     processingElement = linkElement;
     
+    // Add timeout protection for stuck streams (30 seconds)
+    const summaryTimeout = setTimeout(() => {
+      if (currentlyProcessingUrl === url) {
+        console.log('[YouTube] Summary timeout - aborting');
+        chrome.runtime.sendMessage({
+          action: 'ABORT_YOUTUBE_SUMMARY',
+          videoId: videoId
+        });
+        updateYouTubeOverlay('⚠️ Summary timed out (processing took too long)', url);
+        setTimeout(removeYouTubeOverlay, 3000);
+        currentlyProcessingUrl = null;
+      }
+    }, 30000); // 30 second timeout
+    
+    try {
+    
     // Remove any existing overlay first (IMMEDIATE removal to prevent showing old content)
     removeYouTubeOverlay(true); // true = immediate removal, no fade-out
     
@@ -1100,6 +1121,7 @@
           }
           
           // Clear processing state after displaying summary
+          // For YouTube, we always clear since the overlay remains on screen
           currentlyProcessingUrl = null;
         } else if (response && response.status === 'streaming') {
           // Update overlay with streaming message
@@ -1125,6 +1147,10 @@
       updateYouTubeOverlay('❌ Error fetching captions', url);
       setTimeout(removeYouTubeOverlay, 3000);
       currentlyProcessingUrl = null;
+    }
+    } finally {
+      // Clear timeout when function completes (success or error)
+      clearTimeout(summaryTimeout);
     }
   }
   
