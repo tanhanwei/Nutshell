@@ -242,8 +242,8 @@
     }, 3000);
   }
   
-  // Add global commands
-  window.ytTestStart = function() {
+  // Expose functions directly to window (outside IIFE)
+  const ytTestStart = function() {
     if (interceptCleanup) {
       console.warn('Method 4 already active!');
       return;
@@ -253,14 +253,14 @@
     console.log('%c🎬 Ready to capture! Hover over video thumbnails...', 'color: #667eea; font-weight: bold;');
   };
   
-  window.ytTestStop = function() {
+  const ytTestStop = function() {
     if (window.__ytCleanup) {
       window.__ytCleanup();
     }
     console.log('%c🛑 Method 4 stopped', 'color: #f44336; font-weight: bold;');
   };
   
-  window.ytTestResults = function() {
+  const ytTestResults = function() {
     if (window.__ytResults) {
       window.__ytResults();
     } else {
@@ -268,16 +268,17 @@
     }
   };
   
+  // Expose to window
+  window.ytTestStart = ytTestStart;
+  window.ytTestStop = ytTestStop;
+  window.ytTestResults = ytTestResults;
+  
   // Auto-start on YouTube
   if (window.location.hostname.includes('youtube.com')) {
-    console.log('%c🎯 Detected YouTube.com!', 'color: #667eea; font-weight: bold;');
+    console.log('%c🎯 YouTube Caption Test Ready!', 'color: #667eea; font-weight: bold; font-size: 14px;');
     console.log('%c' + '─'.repeat(50), 'color: #667eea;');
-    console.log('%cTo test Method 4, run these commands:', 'color: #667eea; font-weight: bold;');
-    console.log('%c  ytTestStart()    ', 'color: #4CAF50; background: #e8f5e9; padding: 4px 8px; border-radius: 4px;', '← Start capturing');
-    console.log('%c  ytTestResults()  ', 'color: #2196F3; background: #e3f2fd; padding: 4px 8px; border-radius: 4px;', '← Show results');
-    console.log('%c  ytTestStop()     ', 'color: #f44336; background: #ffebee; padding: 4px 8px; border-radius: 4px;', '← Stop capturing');
+    console.log('%cRun: %cytTestStart()%c to start capturing', 'color: #667eea;', 'color: #4CAF50; font-weight: bold;', 'color: #667eea;');
     console.log('%c' + '─'.repeat(50), 'color: #667eea;');
-    console.log('');
   }
 })();
 

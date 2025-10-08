@@ -3,6 +3,12 @@
   
   // Configuration
   const HOVER_DELAY = 300;
+  const DEBUG_ENABLED = !window.location.hostname.includes('youtube.com'); // Disable logs on YouTube to reduce clutter
+  
+  // Debug logging helper
+  const debugLog = (...args) => {
+    if (DEBUG_ENABLED) debugLog(...args);
+  };
   
   // State management
   let currentHoverTimeout = null;
@@ -125,7 +131,7 @@
   // Schedule hiding tooltip with delay
   function scheduleHide(delay = 500, forUrl = null) {
     const shortUrl = forUrl ? getShortUrl(forUrl) : 'none';
-    console.log(`⏲️ SCHEDULE HIDE: for "${shortUrl}" in ${delay}ms (currently showing: "${currentlyDisplayedUrl ? getShortUrl(currentlyDisplayedUrl) : 'none'}")`);
+    debugLog(`⏲️ SCHEDULE HIDE: for "${shortUrl}" in ${delay}ms (currently showing: "${currentlyDisplayedUrl ? getShortUrl(currentlyDisplayedUrl) : 'none'}")`);
     
     clearTimeout(hideTimeout);
     hideTimeout = setTimeout(() => {
@@ -134,10 +140,10 @@
       // 1. Mouse is not in tooltip
       // 2. Either no URL specified, or the tooltip is still showing this URL's content
       if (!isMouseInTooltip && (!forUrl || currentlyDisplayedUrl === forUrl)) {
-        console.log(`🔽 EXECUTING HIDE: scheduled for "${shortUrl}", currently showing "${currentShortUrl}" - HIDING NOW`);
+        debugLog(`🔽 EXECUTING HIDE: scheduled for "${shortUrl}", currently showing "${currentShortUrl}" - HIDING NOW`);
         hideTooltip();
       } else {
-        console.log(`🚫 SKIP HIDE: scheduled for "${shortUrl}", currently showing "${currentShortUrl}" (mouse in tooltip: ${isMouseInTooltip}, URL match: ${currentlyDisplayedUrl === forUrl})`);
+        debugLog(`🚫 SKIP HIDE: scheduled for "${shortUrl}", currently showing "${currentShortUrl}" (mouse in tooltip: ${isMouseInTooltip}, URL match: ${currentlyDisplayedUrl === forUrl})`);
       }
     }, delay);
   }
@@ -147,7 +153,7 @@
     if (displayMode === 'panel') return;
     
     const shortUrl = url ? getShortUrl(url) : 'unknown';
-    console.log(`📤 SHOW TOOLTIP: "${shortUrl}" (was showing: "${currentlyDisplayedUrl ? getShortUrl(currentlyDisplayedUrl) : 'none'}")`);
+    debugLog(`📤 SHOW TOOLTIP: "${shortUrl}" (was showing: "${currentlyDisplayedUrl ? getShortUrl(currentlyDisplayedUrl) : 'none'}")`);
     
     // Cancel any pending hide
     clearTimeout(hideTimeout);
@@ -176,14 +182,14 @@
   function hideTooltip() {
     if (tooltip) {
       const wasShowing = currentlyDisplayedUrl ? getShortUrl(currentlyDisplayedUrl) : 'none';
-      console.log(`📥 HIDE TOOLTIP: was showing "${wasShowing}"`);
+      debugLog(`📥 HIDE TOOLTIP: was showing "${wasShowing}"`);
       
       tooltip.style.opacity = '0';
       currentlyDisplayedUrl = null; // Clear displayed URL when hiding
       setTimeout(() => {
         if (tooltip && !isMouseInTooltip) {
           tooltip.style.display = 'none';
-          console.log(`🔒 TOOLTIP CLOSED: display set to none`);
+          debugLog(`🔒 TOOLTIP CLOSED: display set to none`);
         }
       }, 200);
     }
@@ -195,7 +201,7 @@
     
     const shortUrl = url ? getShortUrl(url) : 'unknown';
     const wasShowing = currentlyDisplayedUrl ? getShortUrl(currentlyDisplayedUrl) : 'none';
-    console.log(`🔄 UPDATE TOOLTIP: "${shortUrl}" (was showing: "${wasShowing}", visible: ${tooltip && tooltip.style.display === 'block'})`);
+    debugLog(`🔄 UPDATE TOOLTIP: "${shortUrl}" (was showing: "${wasShowing}", visible: ${tooltip && tooltip.style.display === 'block'})`);
     
     // Cancel any pending hide when new content arrives (keep tooltip visible during streaming)
     clearTimeout(hideTimeout);
@@ -205,7 +211,7 @@
       // Show tooltip if it's not visible (streaming content arrived)
       if (tooltip.style.display !== 'block') {
         tooltip.style.display = 'block';
-        console.log(`  └─ 👁️ Making tooltip visible`);
+        debugLog(`  └─ 👁️ Making tooltip visible`);
         // Record display time when showing for first time
         if (url) {
           displayTimes.set(url, Date.now());
@@ -275,18 +281,18 @@
     
     // Don't re-trigger if we're already processing this exact URL
     if (currentlyProcessingUrl === url) {
-      console.log(`🚫 BLOCKED: ${linkType} "${shortUrl}" (already processing)`);
+      debugLog(`🚫 BLOCKED: ${linkType} "${shortUrl}" (already processing)`);
       return;
     }
     
     // Cancel any pending hide when hovering a new link (critical for preventing blinks!)
     if (hideTimeout) {
-      console.log(`🚫 CANCEL HIDE: starting hover on "${shortUrl}"`);
+      debugLog(`🚫 CANCEL HIDE: starting hover on "${shortUrl}"`);
       clearTimeout(hideTimeout);
       hideTimeout = null;
     }
     
-    console.log(`✅ HOVER: ${linkType} "${shortUrl}" (will trigger in ${HOVER_DELAY}ms)`);
+    debugLog(`✅ HOVER: ${linkType} "${shortUrl}" (will trigger in ${HOVER_DELAY}ms)`);
     
     currentHoveredElement = link;
     
@@ -309,19 +315,19 @@
     if (relatedTarget) {
       // Don't hide if moving to a child element
       if (link.contains(relatedTarget) || link === relatedTarget) {
-        console.log(`⏭️ MOUSEOUT: "${shortUrl}" (child element, ignored)`);
+        debugLog(`⏭️ MOUSEOUT: "${shortUrl}" (child element, ignored)`);
         return;
       }
       // Don't hide if moving into the tooltip
       if (tooltip && (tooltip.contains(relatedTarget) || tooltip === relatedTarget)) {
-        console.log(`⏭️ MOUSEOUT: "${shortUrl}" (into tooltip, ignored)`);
+        debugLog(`⏭️ MOUSEOUT: "${shortUrl}" (into tooltip, ignored)`);
         return;
       }
     }
     
     // Don't schedule hide if we're actively processing/streaming this URL
     if (currentlyProcessingUrl === url) {
-      console.log(`👋 MOUSEOUT: "${shortUrl}" (streaming active, tooltip will stay visible)`);
+      debugLog(`👋 MOUSEOUT: "${shortUrl}" (streaming active, tooltip will stay visible)`);
       // Don't schedule hide - streaming updates will keep it visible
       // It will only hide when streaming completes or user switches to different URL
     } else {
@@ -330,22 +336,22 @@
       const timeSinceDisplay = urlDisplayTime > 0 ? Date.now() - urlDisplayTime : Infinity;
       const MIN_DISPLAY_TIME = 500; // Minimum time to show content before allowing hide
       
-      console.log(`[DEBUG] URL: "${shortUrl}", displayTime: ${urlDisplayTime}, timeSinceDisplay: ${timeSinceDisplay}ms`);
+      debugLog(`[DEBUG] URL: "${shortUrl}", displayTime: ${urlDisplayTime}, timeSinceDisplay: ${timeSinceDisplay}ms`);
       
       if (timeSinceDisplay < MIN_DISPLAY_TIME && urlDisplayTime > 0) {
         // Content was just displayed, use longer delay to give user time to see it
         const remainingTime = MIN_DISPLAY_TIME - timeSinceDisplay;
-        console.log(`👋 MOUSEOUT: "${shortUrl}" (content just shown, waiting ${Math.round(remainingTime)}ms before scheduling hide)`);
+        debugLog(`👋 MOUSEOUT: "${shortUrl}" (content just shown, waiting ${Math.round(remainingTime)}ms before scheduling hide)`);
         
         // Schedule hide after the protection window expires
         setTimeout(() => {
           if (!isMouseInTooltip && !currentHoveredElement) {
-            console.log(`⏰ Protection window expired for "${shortUrl}", now scheduling hide`);
+            debugLog(`⏰ Protection window expired for "${shortUrl}", now scheduling hide`);
             scheduleHide(500, url); // 500ms > 300ms hover delay to prevent race condition
           }
         }, remainingTime);
       } else {
-        console.log(`👋 MOUSEOUT: "${shortUrl}" (scheduling hide in 500ms, reason: ${urlDisplayTime === 0 ? 'never displayed' : `too long ago (${timeSinceDisplay}ms)`})`);
+        debugLog(`👋 MOUSEOUT: "${shortUrl}" (scheduling hide in 500ms, reason: ${urlDisplayTime === 0 ? 'never displayed' : `too long ago (${timeSinceDisplay}ms)`})`);
         scheduleHide(500, url); // 500ms > 300ms hover delay to prevent race condition
       }
     }
@@ -364,14 +370,14 @@
     
     // Clear previous processing URL when starting a new one
     if (currentlyProcessingUrl && currentlyProcessingUrl !== url) {
-      console.log(`🔄 SWITCHING: from "${getShortUrl(currentlyProcessingUrl)}" to "${shortUrl}"`);
+      debugLog(`🔄 SWITCHING: from "${getShortUrl(currentlyProcessingUrl)}" to "${shortUrl}"`);
     }
     
     // Mark this URL as currently being processed
     currentlyProcessingUrl = url;
     processingElement = link; // Track element for positioning during streaming
     
-    console.log(`🔄 PROCESSING: "${shortUrl}"`);
+    debugLog(`🔄 PROCESSING: "${shortUrl}"`);
     
     // Show loading state in tooltip
     if (displayMode === 'tooltip' || displayMode === 'both') {
@@ -434,7 +440,7 @@
     const isStillCurrent = (currentlyProcessingUrl === url);
     
     if (result.status === 'duplicate') {
-      console.log(`❌ DUPLICATE: "${shortUrl}" (ignoring)`);
+      debugLog(`❌ DUPLICATE: "${shortUrl}" (ignoring)`);
       // Only clear if this was the current URL
       if (isStillCurrent) {
         currentlyProcessingUrl = null;
@@ -444,7 +450,7 @@
     }
     
     if (result.status === 'aborted') {
-      console.log(`❌ ABORTED: "${shortUrl}" (was canceled, ${isStillCurrent ? 'clearing' : 'already moved on'})`);
+      debugLog(`❌ ABORTED: "${shortUrl}" (was canceled, ${isStillCurrent ? 'clearing' : 'already moved on'})`);
       // Don't clear - user has likely already moved to a different URL
       // The new URL's processing will have set currentlyProcessingUrl to the new value
       return;
@@ -465,7 +471,7 @@
     
     // If complete and cached, display immediately (no streaming updates will come)
     if (result.status === 'complete' && result.cached) {
-      console.log(`💾 CACHED: "${shortUrl}" (instant display, still current: ${isStillCurrent})`);
+      debugLog(`💾 CACHED: "${shortUrl}" (instant display, still current: ${isStillCurrent})`);
       
       // Only display if this is still the current URL
       if (isStillCurrent) {
@@ -489,16 +495,16 @@
         // Done processing this URL
         currentlyProcessingUrl = null;
         processingElement = null;
-        console.log(`✅ COMPLETE: "${shortUrl}" (ready for next hover)`);
+        debugLog(`✅ COMPLETE: "${shortUrl}" (ready for next hover)`);
       } else {
-        console.log(`⚠️ STALE CACHED: "${shortUrl}" (user moved on, ignoring)`);
+        debugLog(`⚠️ STALE CACHED: "${shortUrl}" (user moved on, ignoring)`);
       }
     } else if (isStillCurrent) {
       // Streaming result - only log if still current
-      console.log(`📡 STREAMING: "${shortUrl}" (will receive updates)`);
+      debugLog(`📡 STREAMING: "${shortUrl}" (will receive updates)`);
     } else {
       // Streaming result arrived but user has moved on
-      console.log(`⚠️ STALE STREAMING: "${shortUrl}" (user moved on, ignoring)`);
+      debugLog(`⚠️ STALE STREAMING: "${shortUrl}" (user moved on, ignoring)`);
     }
     
     // If not cached, summary will arrive via STREAMING_UPDATE messages
@@ -513,7 +519,7 @@
         updateTooltipContent(message.content, message.url);
       } else {
         const shortUrl = getShortUrl(message.url);
-        console.log(`⚠️ STALE STREAM UPDATE: "${shortUrl}" (ignoring, current: "${currentlyProcessingUrl ? getShortUrl(currentlyProcessingUrl) : 'none'}")`);
+        debugLog(`⚠️ STALE STREAM UPDATE: "${shortUrl}" (ignoring, current: "${currentlyProcessingUrl ? getShortUrl(currentlyProcessingUrl) : 'none'}")`);
       }
     }
     
@@ -527,7 +533,7 @@
     
     if (message.type === 'DISPLAY_MODE_CHANGED') {
       displayMode = message.displayMode;
-      console.log('[Content] Display mode updated:', displayMode);
+      debugLog('[Content] Display mode updated:', displayMode);
       if (displayMode === 'panel') {
         hideTooltip();
       }
@@ -538,7 +544,7 @@
   chrome.storage.local.get(['displayMode'], (result) => {
     if (result.displayMode) {
       displayMode = result.displayMode;
-      console.log('[Content] Initial display mode:', displayMode);
+      debugLog('[Content] Initial display mode:', displayMode);
     }
   });
   
@@ -546,7 +552,7 @@
   document.body.addEventListener('mouseover', handleMouseOver, true);
   document.body.addEventListener('mouseout', handleMouseOut, true);
   
-  console.log('[Content] Hover link extension initialized');
+  debugLog('[Content] Hover link extension initialized');
   
   // Format AI summary (same as background.js)
   function formatAISummary(text) {
