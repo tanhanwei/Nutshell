@@ -280,10 +280,7 @@
   function handleMouseOver(e) {
     const link = findLink(e.target);
     if (!link) {
-      // Only log on YouTube for debugging
-      if (IS_YOUTUBE) {
-        console.log('[YouTube] Mouseover but no link found, target:', e.target.tagName, e.target.className);
-      }
+      // Not a link, skip (don't log - too noisy on YouTube)
       return;
     }
     
@@ -313,7 +310,15 @@
       }
       
       // CRITICAL: Cancel old processing BEFORE starting new one
-      // 1. Remove ANY existing overlay (could be from completed summary or in-progress)
+      
+      // 1. ALWAYS clear currentlyProcessingUrl when switching videos
+      // This prevents streaming updates from old video bleeding into new overlay
+      if (currentlyProcessingUrl && currentlyProcessingUrl !== url) {
+        console.log(`[YouTube] CANCELING processing for: ${currentlyProcessingUrl}`);
+        currentlyProcessingUrl = null;
+      }
+      
+      // 2. Remove ANY existing overlay (could be from completed summary or in-progress)
       if (currentYouTubeOverlay) {
         if (currentYouTubeOverlayUrl !== url) {
           console.log(`[YouTube] Removing old overlay (was for: ${currentYouTubeOverlayUrl}, now hovering: ${url})`);
@@ -322,7 +327,6 @@
           console.log(`[YouTube] Already have overlay for this URL, refreshing...`);
           removeYouTubeOverlay(true); // Remove and recreate
         }
-        currentlyProcessingUrl = null;
       }
       
       // 2. Clear old hover timeout
@@ -636,10 +640,16 @@
       if (message.url === currentlyProcessingUrl) {
         // Check if we're showing YouTube overlay or regular tooltip
         if (IS_YOUTUBE && currentYouTubeOverlay) {
-          // Update YouTube overlay with streaming content
-          // Note: content is already formatted as HTML by background.js
-          updateYouTubeOverlay(message.content, message.url);
-          console.log('[YouTube] Streaming update received, overlay updated');
+          // ADDITIONAL SAFEGUARD: Verify overlay URL matches message URL
+          // This prevents streaming from Video A appearing in Video B's overlay
+          if (currentYouTubeOverlayUrl === message.url) {
+            // Update YouTube overlay with streaming content
+            // Note: content is already formatted as HTML by background.js
+            updateYouTubeOverlay(message.content, message.url);
+            // Streaming log is too noisy, skip it (updateYouTubeOverlay logs final result)
+          } else {
+            console.warn(`[YouTube] Rejecting stream update: overlay is for ${currentYouTubeOverlayUrl}, update is for ${message.url}`);
+          }
         } else {
           // Update regular tooltip
           updateTooltipContent(message.content, message.url);
@@ -888,16 +898,14 @@
    * Update YouTube overlay content (only if it's for the right URL)
    */
   function updateYouTubeOverlay(content, forUrl) {
-    console.log('[YouTube] updateYouTubeOverlay called with forUrl:', forUrl);
-    console.log('[YouTube] currentYouTubeOverlay:', currentYouTubeOverlay ? 'exists' : 'NULL');
-    console.log('[YouTube] currentYouTubeOverlayUrl:', currentYouTubeOverlayUrl);
-    
     if (currentYouTubeOverlay) {
       // Only update if this is for the current overlay's URL (prevent stale updates)
       if (!forUrl || currentYouTubeOverlayUrl === forUrl) {
-        console.log('[YouTube] Updating overlay content, length:', content.length);
         currentYouTubeOverlay.contentArea.innerHTML = content;
-        console.log('[YouTube] Overlay content updated successfully');
+        // Only log non-streaming updates (streaming creates too much noise)
+        if (!content.startsWith('⏳') && !content.startsWith('🤖') && content.length > 100) {
+          console.log('[YouTube] Overlay updated (length:', content.length, ')');
+        }
       } else {
         console.log(`[YouTube] Ignoring update for ${forUrl}, current overlay is for ${currentYouTubeOverlayUrl}`);
       }
@@ -1059,26 +1067,21 @@
           return;
         }
         
-        console.log('[YouTube] Response:', response);
-        console.log('[YouTube] Current overlay:', currentYouTubeOverlay ? 'exists' : 'NULL');
-        console.log('[YouTube] Current overlay URL:', currentYouTubeOverlayUrl);
-        console.log('[YouTube] Response URL:', url);
+        console.log('[YouTube] Response:', response.status, response.cached ? '(cached)' : '');
         
         if (response && response.status === 'complete') {
           // Display the summary
           const summary = response.summary || 'No summary generated';
           const formatted = formatAISummary(summary);
           
-          console.log('[YouTube] Displaying summary, length:', summary.length);
+          console.log('[YouTube] Displaying summary (length:', summary.length, ')');
           
           // Update state
           currentlyDisplayedUrl = url;
           displayTimes.set(url, Date.now());
           
           // Show summary in overlay
-          console.log('[YouTube] About to call updateYouTubeOverlay...');
           updateYouTubeOverlay(formatted, url);
-          console.log('[YouTube] updateYouTubeOverlay called');
           
           // Also send to side panel if enabled
           if (displayMode === 'sidepanel' || displayMode === 'both') {
