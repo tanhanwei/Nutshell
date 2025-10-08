@@ -423,6 +423,24 @@
       console.log('[YouTube] Mouseout detected from thumbnail, url:', url);
       console.log('[YouTube] currentlyProcessingUrl:', currentlyProcessingUrl);
       
+      // ✅ FIX: Check if mouse is actually leaving or just moving to child element
+      const relatedTarget = e.relatedTarget;
+      const thumbnailElement = e.target.closest('ytd-thumbnail') || 
+                              e.target.closest('ytd-video-preview') || 
+                              e.target.closest('ytd-playlist-thumbnail');
+      
+      // If relatedTarget is still within the thumbnail, ignore this mouseout
+      if (relatedTarget && thumbnailElement && thumbnailElement.contains(relatedTarget)) {
+        console.log('[YouTube] Ignoring mouseout (moving within thumbnail)');
+        return;
+      }
+      
+      // If relatedTarget is our overlay, ignore this mouseout
+      if (relatedTarget && relatedTarget.closest && relatedTarget.closest('#youtube-summary-overlay')) {
+        console.log('[YouTube] Ignoring mouseout (moving to overlay)');
+        return;
+      }
+      
       // Cancel this URL's pending hover timeout (if any)
       const pendingTimeout = hoverTimeouts.get(url);
       if (pendingTimeout) {
