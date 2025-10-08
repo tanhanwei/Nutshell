@@ -786,19 +786,44 @@
   
   /**
    * Remove YouTube overlay
+   * @param {boolean} immediate - If true, remove immediately without fade-out animation
    */
-  function removeYouTubeOverlay() {
+  function removeYouTubeOverlay(immediate = false) {
     if (currentYouTubeOverlay) {
       const { overlay } = currentYouTubeOverlay;
-      overlay.style.opacity = '0';
-      setTimeout(() => {
+      
+      if (immediate) {
+        // Immediate removal (for switching between thumbnails)
         if (overlay.parentNode) {
           overlay.parentNode.removeChild(overlay);
         }
-      }, 300);
+        console.log('[YouTube] Overlay removed immediately');
+      } else {
+        // Graceful fade-out (for mouse leaving)
+        overlay.style.opacity = '0';
+        setTimeout(() => {
+          if (overlay.parentNode) {
+            overlay.parentNode.removeChild(overlay);
+          }
+        }, 300);
+        console.log('[YouTube] Overlay fade-out started');
+      }
+      
       currentYouTubeOverlay = null;
       currentYouTubeOverlayUrl = null;
-      console.log('[YouTube] Overlay removed');
+    }
+    
+    // Also forcefully remove any stray overlays that might still be in the DOM
+    if (immediate) {
+      const strayOverlays = document.querySelectorAll('.yt-summary-overlay');
+      strayOverlays.forEach(overlay => {
+        if (overlay.parentNode) {
+          overlay.parentNode.removeChild(overlay);
+        }
+      });
+      if (strayOverlays.length > 0) {
+        console.log(`[YouTube] Removed ${strayOverlays.length} stray overlay(s)`);
+      }
     }
   }
   
@@ -883,8 +908,8 @@
     // Store element for positioning
     processingElement = linkElement;
     
-    // Remove any existing overlay first (critical for switching between thumbnails)
-    removeYouTubeOverlay();
+    // Remove any existing overlay first (IMMEDIATE removal to prevent showing old content)
+    removeYouTubeOverlay(true); // true = immediate removal, no fade-out
     
     // Create YouTube overlay (pass the thumbnail container)
     currentYouTubeOverlay = createYouTubeOverlay(thumbnailElement);
