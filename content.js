@@ -26,7 +26,8 @@
   let hoverTimeouts = new Map(); // Track hover timeouts per URL (url -> timeout ID)
   
   // YouTube-specific state
-  let currentYouTubeOverlay = null; // Track active YouTube overlay
+  let currentYouTubeOverlay = null; // Track active YouTube overlay element
+  let currentYouTubeOverlayContentArea = null; // Track the content area within the overlay
   let currentYouTubeOverlayUrl = null; // Track which URL the YouTube overlay is for
   let overlayCreatedTime = 0; // Track when overlay was created (to prevent immediate mouseout)
   
@@ -350,6 +351,7 @@
           console.log(`[YouTube] Removing overlay for: ${currentYouTubeOverlayUrl}`);
           removeYouTubeOverlay(true);
           currentYouTubeOverlay = null;
+          currentYouTubeOverlayContentArea = null;
         }
         
         // ✅ FIX: Don't clear states here - let them get overwritten below
@@ -906,7 +908,7 @@
    */
   function removeYouTubeOverlay(immediate = false) {
     if (currentYouTubeOverlay) {
-      const { overlay } = currentYouTubeOverlay;
+      const overlay = currentYouTubeOverlay; // It's already the overlay element
       
       if (immediate) {
         // Immediate removal (for switching between thumbnails)
@@ -926,6 +928,7 @@
       }
       
       currentYouTubeOverlay = null;
+      currentYouTubeOverlayContentArea = null;
       currentYouTubeOverlayUrl = null;
       overlayCreatedTime = 0; // Reset timestamp
     }
@@ -948,10 +951,10 @@
    * Update YouTube overlay content (only if it's for the right URL)
    */
   function updateYouTubeOverlay(content, forUrl) {
-    if (currentYouTubeOverlay) {
+    if (currentYouTubeOverlay && currentYouTubeOverlayContentArea) {
       // Only update if this is for the current overlay's URL (prevent stale updates)
       if (!forUrl || currentYouTubeOverlayUrl === forUrl) {
-        currentYouTubeOverlay.contentArea.innerHTML = content;
+        currentYouTubeOverlayContentArea.innerHTML = content;
         // Only log non-streaming updates (streaming creates too much noise)
         if (!content.startsWith('⏳') && !content.startsWith('🤖') && content.length > 100) {
           console.log('[YouTube] Overlay updated (length:', content.length, ')');
@@ -960,7 +963,7 @@
         console.log(`[YouTube] Ignoring update for ${forUrl}, current overlay is for ${currentYouTubeOverlayUrl}`);
       }
     } else {
-      console.warn('[YouTube] Cannot update overlay - currentYouTubeOverlay is NULL');
+      console.warn('[YouTube] Cannot update overlay - currentYouTubeOverlay or contentArea is NULL');
     }
   }
   
@@ -1055,17 +1058,21 @@
     removeYouTubeOverlay(true); // true = immediate removal, no fade-out
     
     // Create YouTube overlay (pass the thumbnail container)
-    currentYouTubeOverlay = createYouTubeOverlay(thumbnailElement);
+    const overlayResult = createYouTubeOverlay(thumbnailElement);
     currentYouTubeOverlayUrl = url; // Track which URL this overlay is for
     overlayCreatedTime = Date.now(); // Track creation time to prevent immediate mouseout
     
-    if (!currentYouTubeOverlay) {
+    if (!overlayResult || !overlayResult.overlay) {
       console.warn('[YouTube] Failed to create overlay, falling back to tooltip');
       if (displayMode === 'tooltip' || displayMode === 'both') {
         showTooltip(linkElement, 'Waiting for captions to load...', url);
       }
       return;
     }
+    
+    // Extract the overlay element and content area from the result
+    currentYouTubeOverlay = overlayResult.overlay;
+    currentYouTubeOverlayContentArea = overlayResult.contentArea;
     
     console.log('[YouTube] Overlay created for:', url);
     
@@ -1077,6 +1084,7 @@
         removeYouTubeOverlay();
         currentlyProcessingUrl = null;
         currentYouTubeOverlayUrl = null;
+        currentYouTubeOverlayContentArea = null;
         console.log('[YouTube] Cleared state after leaving overlay');
       }
     });
