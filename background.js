@@ -36,44 +36,81 @@ async function initializeSummarizerAPI() {
   };
 }
 
+// Helper to create a default API state so status checks are safe before init completes
+function createInitialApiState() {
+  return {
+    summarizer: {
+      available: false,
+      status: 'initializing',
+      availability: null,
+      create: null
+    },
+    promptAPI: {
+      available: false,
+      status: 'initializing',
+      availability: null,
+      create: null,
+      params: null
+    }
+  };
+}
+
 // Global API reference
-let SummarizerAPI = null;
+let SummarizerAPI = createInitialApiState();
 
 // Initialize APIs on service worker startup
-(async function initAPIs() {
-  SummarizerAPI = await initializeSummarizerAPI();
-  console.log('[Background] APIs initialized:', SummarizerAPI);
-  
-  // Check Summarizer availability
-  if (SummarizerAPI.summarizer.available) {
-    try {
-      const summarizerAvailability = await SummarizerAPI.summarizer.availability();
-      console.log('[Background] Summarizer availability:', summarizerAvailability);
-      SummarizerAPI.summarizer.status = summarizerAvailability;
-    } catch (error) {
-      console.error('[Background] Summarizer availability check failed:', error);
+async function initAPIs() {
+  try {
+    const api = await initializeSummarizerAPI();
+
+    Object.assign(SummarizerAPI.summarizer, api.summarizer);
+    SummarizerAPI.summarizer.status = SummarizerAPI.summarizer.available ? 'initializing' : 'unavailable';
+
+    Object.assign(SummarizerAPI.promptAPI, api.promptAPI);
+    SummarizerAPI.promptAPI.status = SummarizerAPI.promptAPI.available ? 'initializing' : 'unavailable';
+
+    console.log('[Background] APIs initialized:', {
+      summarizerAvailable: SummarizerAPI.summarizer.available,
+      promptAvailable: SummarizerAPI.promptAPI.available
+    });
+
+    // Check Summarizer availability
+    if (SummarizerAPI.summarizer.available && SummarizerAPI.summarizer.availability) {
+      try {
+        const summarizerAvailability = await SummarizerAPI.summarizer.availability();
+        console.log('[Background] Summarizer availability:', summarizerAvailability);
+        SummarizerAPI.summarizer.status = summarizerAvailability;
+      } catch (error) {
+        console.error('[Background] Summarizer availability check failed:', error);
+        SummarizerAPI.summarizer.status = 'unavailable';
+      }
+    } else {
       SummarizerAPI.summarizer.status = 'unavailable';
     }
-  } else {
-    SummarizerAPI.summarizer.status = 'unavailable';
-  }
-  
-  // Check Prompt API availability
-  if (SummarizerAPI.promptAPI.available) {
-    try {
-      const promptAvailability = await SummarizerAPI.promptAPI.availability({
-        expectedOutputs: [{ type: 'text', languages: ['en'] }]
-      });
-      console.log('[Background] Prompt API availability:', promptAvailability);
-      SummarizerAPI.promptAPI.status = promptAvailability;
-    } catch (error) {
-      console.error('[Background] Prompt API availability check failed:', error);
+
+    // Check Prompt API availability
+    if (SummarizerAPI.promptAPI.available && SummarizerAPI.promptAPI.availability) {
+      try {
+        const promptAvailability = await SummarizerAPI.promptAPI.availability({
+          expectedOutputs: [{ type: 'text', languages: ['en'] }]
+        });
+        console.log('[Background] Prompt API availability:', promptAvailability);
+        SummarizerAPI.promptAPI.status = promptAvailability;
+      } catch (error) {
+        console.error('[Background] Prompt API availability check failed:', error);
+        SummarizerAPI.promptAPI.status = 'unavailable';
+      }
+    } else {
       SummarizerAPI.promptAPI.status = 'unavailable';
     }
-  } else {
-    SummarizerAPI.promptAPI.status = 'unavailable';
+  } catch (error) {
+    console.error('[Background] API initialization failed:', error);
+    SummarizerAPI.summarizer.status = 'error';
+    SummarizerAPI.promptAPI.status = 'error';
   }
-})();
+}
+
+const apiInitializationPromise = initAPIs();
 
 // ========================================
 // SETTINGS MANAGEMENT
@@ -148,6 +185,7 @@ setInterval(() => {
 // ========================================
 
 async function summarizeContent(text, signal, url) {
+  await apiInitializationPromise;
   if (settings.apiChoice === 'summarization') {
     return await useSummarizationAPI(text, signal, url);
   } else {
@@ -927,9 +965,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   
   // Handle get API status
   if (message.type === 'GET_API_STATUS') {
-    sendResponse({
-      summarizer: SummarizerAPI.summarizer.status,
-      promptAPI: SummarizerAPI.promptAPI.status
+    apiInitializationPromise.finally(() => {
+      sendResponse({
+        summarizer: SummarizerAPI.summarizer.status,
+        promptAPI: SummarizerAPI.promptAPI.status
+      });
     });
     return true;
   }
