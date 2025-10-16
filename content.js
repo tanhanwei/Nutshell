@@ -11,6 +11,15 @@
     if (DEBUG_ENABLED) console.log(...args);
   };
   
+  const REDDIT_HOSTS = [
+    'reddit.com',
+    'www.reddit.com',
+    'old.reddit.com',
+    'new.reddit.com',
+    'np.reddit.com',
+    'redd.it'
+  ];
+  
   // State management
   let currentHoverTimeout = null;
   let hideTimeout = null;
@@ -19,6 +28,7 @@
   let currentlyDisplayedUrl = null; // Track what URL the tooltip is currently showing
   let processingElement = null; // Track element being processed for positioning
   let tooltip = null;
+  let tooltipCloseHandlerAttached = false;
   let displayMode = 'both';
   let currentHoveredElement = null;
   let isMouseInTooltip = false;
@@ -136,6 +146,34 @@
     tooltip.style.left = `${left}px`;
   }
   
+  const handleTooltipPointerDown = (event) => {
+    if (!tooltip || tooltip.style.display !== 'block') return;
+    if (tooltip.contains(event.target)) {
+      return;
+    }
+    hideTooltip();
+  };
+  
+  const handleTooltipKeyDown = (event) => {
+    if (event.key === 'Escape' && tooltip && tooltip.style.display === 'block') {
+      hideTooltip();
+    }
+  };
+  
+  function attachTooltipDismissHandlers() {
+    if (tooltipCloseHandlerAttached) return;
+    document.addEventListener('pointerdown', handleTooltipPointerDown, true);
+    document.addEventListener('keydown', handleTooltipKeyDown, true);
+    tooltipCloseHandlerAttached = true;
+  }
+  
+  function detachTooltipDismissHandlers() {
+    if (!tooltipCloseHandlerAttached) return;
+    document.removeEventListener('pointerdown', handleTooltipPointerDown, true);
+    document.removeEventListener('keydown', handleTooltipKeyDown, true);
+    tooltipCloseHandlerAttached = false;
+  }
+  
   // Schedule hiding tooltip with delay
   function scheduleHide(delay = 500, forUrl = null) {
     const shortUrl = forUrl ? getShortUrl(forUrl) : 'none';
@@ -170,6 +208,7 @@
     const tooltipEl = createTooltip();
     tooltipEl.innerHTML = content;
     tooltipEl.style.display = 'block';
+    attachTooltipDismissHandlers();
     
     // Track what URL is currently displayed
     currentlyDisplayedUrl = url;
@@ -200,6 +239,11 @@
           debugLog(`🔒 TOOLTIP CLOSED: display set to none`);
         }
       }, 200);
+      
+      detachTooltipDismissHandlers();
+      currentlyProcessingUrl = null;
+      processingElement = null;
+      currentHoveredElement = null;
     }
   }
   
@@ -275,6 +319,31 @@
       return lastSegments || urlObj.hostname;
     } catch {
       return url.substring(0, 50);
+    }
+  }
+  
+  function isRedditPostUrl(url) {
+    try {
+      const parsed = new URL(url);
+      const hostname = parsed.hostname.toLowerCase();
+      
+      const matchesRedditHost = REDDIT_HOSTS.some(host => {
+        if (hostname === host) return true;
+        return hostname.endsWith(`.${host}`);
+      });
+      
+      if (!matchesRedditHost) {
+        return false;
+      }
+      
+      if (hostname === 'redd.it' || hostname.endsWith('.redd.it')) {
+        const slug = parsed.pathname.replace(/\//g, '').trim();
+        return /^[a-z0-9]+$/i.test(slug);
+      }
+      
+      return /\/comments\/[a-z0-9]+/i.test(parsed.pathname);
+    } catch {
+      return false;
     }
   }
   
@@ -545,6 +614,7 @@
   async function processLinkHover(link) {
     const url = link.href;
     const shortUrl = getShortUrl(url);
+    const isReddit = isRedditPostUrl(url);
     
     // Clear previous processing URL when starting a new one
     if (currentlyProcessingUrl && currentlyProcessingUrl !== url) {
@@ -555,11 +625,19 @@
     currentlyProcessingUrl = url;
     processingElement = link; // Track element for positioning during streaming
     
-    debugLog(`🔄 PROCESSING: "${shortUrl}"`);
+    debugLog(`🔄 PROCESSING: "${shortUrl}"${isReddit ? ' [Reddit]' : ''}`);
     
     // Show loading state in tooltip
     if (displayMode === 'tooltip' || displayMode === 'both') {
-      showTooltip(link, '<div style="text-align:center;padding:20px;opacity:0.6;">Extracting content...</div>', url);
+      const loadingMessage = isReddit
+        ? '<div style="text-align:center;padding:20px;opacity:0.6;">Gathering Reddit discussion...</div>'
+        : '<div style="text-align:center;padding:20px;opacity:0.6;">Extracting content...</div>';
+      showTooltip(link, loadingMessage, url);
+    }
+    
+    if (isReddit) {
+      await processRedditPost(link, url, shortUrl);
+      return;
     }
     
     // Fetch HTML
@@ -616,10 +694,52 @@
     
     // Check if this result is still for the current URL we care about
     const isStillCurrent = (currentlyProcessingUrl === url);
+    handleSummaryResult(result, link, url, shortUrl, isStillCurrent);
+  }
+  
+  async function processRedditPost(link, url, shortUrl) {
+    debugLog(`🧵 REDDIT REQUEST: "${shortUrl}"`);
+    
+    if (displayMode === 'tooltip' || displayMode === 'both') {
+      showTooltip(link, '<div style="opacity:0.6;font-style:italic;">Summarizing Reddit discussion...</div>', url);
+    }
+    
+    try {
+      const result = await chrome.runtime.sendMessage({
+        type: 'SUMMARIZE_REDDIT_POST',
+        url: url
+      });
+      
+      const isStillCurrent = (currentlyProcessingUrl === url);
+      handleSummaryResult(result, link, url, shortUrl, isStillCurrent);
+    } catch (error) {
+      console.error(`[Reddit] Summary failed for "${shortUrl}":`, error);
+      if (displayMode === 'tooltip' || displayMode === 'both') {
+        const message = (error && error.message) ? error.message : 'Unable to summarize Reddit thread';
+        showTooltip(link, `<div style="padding:10px;background:#fee;border-radius:8px;">Error: ${message}</div>`, url);
+      }
+      if (currentlyProcessingUrl === url) {
+        currentlyProcessingUrl = null;
+        processingElement = null;
+      }
+    }
+  }
+  
+  function handleSummaryResult(result, link, url, shortUrl, isStillCurrent) {
+    if (!result || !result.status) {
+      debugLog(`❌ INVALID RESULT: "${shortUrl}"`);
+      if (displayMode === 'tooltip' || displayMode === 'both') {
+        showTooltip(link, '<div style="padding:10px;background:#fee;border-radius:8px;">Error: No summary result returned.</div>', url);
+      }
+      if (isStillCurrent) {
+        currentlyProcessingUrl = null;
+        processingElement = null;
+      }
+      return;
+    }
     
     if (result.status === 'duplicate') {
       debugLog(`❌ DUPLICATE: "${shortUrl}" (ignoring)`);
-      // Only clear if this was the current URL
       if (isStillCurrent) {
         currentlyProcessingUrl = null;
         processingElement = null;
@@ -629,17 +749,15 @@
     
     if (result.status === 'aborted') {
       debugLog(`❌ ABORTED: "${shortUrl}" (was canceled, ${isStillCurrent ? 'clearing' : 'already moved on'})`);
-      // Don't clear - user has likely already moved to a different URL
-      // The new URL's processing will have set currentlyProcessingUrl to the new value
       return;
     }
     
     if (result.status === 'error') {
-      console.error(`❌ ERROR: "${shortUrl}" - ${result.error}`);
-      if (displayMode === 'tooltip' || displayMode === 'both' && isStillCurrent) {
-        showTooltip(link, `<div style="padding:10px;background:#fee;border-radius:8px;">Error: ${result.error}</div>`, url);
+      const errorMessage = result.error || result.message || 'Unknown error';
+      console.error(`❌ ERROR: "${shortUrl}" - ${errorMessage}`);
+      if (displayMode === 'tooltip' || (displayMode === 'both' && isStillCurrent)) {
+        showTooltip(link, `<div style="padding:10px;background:#fee;border-radius:8px;">Error: ${errorMessage}</div>`, url);
       }
-      // Only clear if this was the current URL
       if (isStillCurrent) {
         currentlyProcessingUrl = null;
         processingElement = null;
@@ -647,21 +765,16 @@
       return;
     }
     
-    // If complete and cached, display immediately (no streaming updates will come)
     if (result.status === 'complete' && result.cached) {
       debugLog(`💾 CACHED: "${shortUrl}" (instant display, still current: ${isStillCurrent})`);
       
-      // Only display if this is still the current URL
       if (isStillCurrent) {
-        // Format the summary
         const formattedSummary = formatAISummary(result.summary);
         
-        // Show in tooltip
         if (displayMode === 'tooltip' || displayMode === 'both') {
           showTooltip(link, formattedSummary, url);
         }
         
-        // Send to sidepanel
         if (displayMode === 'panel' || displayMode === 'both') {
           chrome.runtime.sendMessage({
             type: 'DISPLAY_CACHED_SUMMARY',
@@ -670,23 +783,21 @@
           }).catch(() => {});
         }
         
-        // Done processing this URL
         currentlyProcessingUrl = null;
         processingElement = null;
         debugLog(`✅ COMPLETE: "${shortUrl}" (ready for next hover)`);
       } else {
         debugLog(`⚠️ STALE CACHED: "${shortUrl}" (user moved on, ignoring)`);
       }
-    } else if (isStillCurrent) {
-      // Streaming result - only log if still current
-      debugLog(`📡 STREAMING: "${shortUrl}" (will receive updates)`);
-    } else {
-      // Streaming result arrived but user has moved on
-      debugLog(`⚠️ STALE STREAMING: "${shortUrl}" (user moved on, ignoring)`);
+      return;
     }
     
-    // If not cached, summary will arrive via STREAMING_UPDATE messages
-    // Note: For streaming, we keep currentlyProcessingUrl set until user hovers another link
+    if (isStillCurrent) {
+      debugLog(`📡 STREAMING: "${shortUrl}" (will receive updates)`);
+    } else {
+      debugLog(`⚠️ STALE STREAMING: "${shortUrl}" (user moved on, ignoring)`);
+    }
+    // Streaming updates are handled via STREAMING_UPDATE messages.
   }
   
   // Listen for messages from background

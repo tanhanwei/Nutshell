@@ -716,6 +716,224 @@ function broadcastProcessingStatus(status, title) {
 }
 
 // ========================================
+// REDDIT THREAD HELPERS
+// ========================================
+
+const REDDIT_COMMENT_LIMIT = 5;
+const REDDIT_POST_CHAR_LIMIT = 1500;
+const REDDIT_COMMENT_CHAR_LIMIT = 600;
+
+function buildRedditApiUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    const hostname = parsed.hostname.toLowerCase();
+    
+    if (hostname === 'redd.it' || hostname.endsWith('.redd.it')) {
+      const slug = parsed.pathname.replace(/\//g, '').trim();
+      if (!slug) return null;
+      const apiUrl = new URL(`/comments/${slug}.json`, 'https://www.reddit.com');
+      apiUrl.searchParams.set('limit', '40');
+      apiUrl.searchParams.set('depth', '2');
+      apiUrl.searchParams.set('raw_json', '1');
+      return { apiUrl: apiUrl.toString(), threadId: slug };
+    }
+    
+    if (!hostname.endsWith('reddit.com')) {
+      return null;
+    }
+    
+    if (!/\/comments\/[a-z0-9]+/i.test(parsed.pathname)) {
+      return null;
+    }
+    
+    let normalizedPath = parsed.pathname;
+    if (normalizedPath.endsWith('/')) {
+      normalizedPath = normalizedPath.slice(0, -1);
+    }
+    if (normalizedPath.endsWith('.json')) {
+      normalizedPath = normalizedPath.slice(0, -5);
+    }
+    
+    const apiUrl = new URL(`${normalizedPath}.json`, 'https://www.reddit.com');
+    apiUrl.searchParams.set('limit', '40');
+    apiUrl.searchParams.set('depth', '2');
+    apiUrl.searchParams.set('raw_json', '1');
+    
+    const idMatch = normalizedPath.match(/\/comments\/([a-z0-9]+)/i);
+    const threadId = idMatch ? idMatch[1] : null;
+    
+    return { apiUrl: apiUrl.toString(), threadId };
+  } catch (error) {
+    console.warn('[Reddit] Failed to build API url:', error);
+    return null;
+  }
+}
+
+function normalizeRedditText(text) {
+  if (!text) return '';
+  return text
+    .replace(/\r\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/\[(.*?)\]\((https?:\/\/[^\s)]+)\)/g, '$1 ($2)')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, '\'')
+    .trim();
+}
+
+function truncateText(text, maxLength) {
+  if (!text) return '';
+  if (text.length <= maxLength) return text;
+  return text.slice(0, maxLength - 1).trimEnd() + '…';
+}
+
+function extractRedditThread(json) {
+  if (!Array.isArray(json) || json.length === 0) {
+    return null;
+  }
+  
+  const postListing = json[0]?.data?.children?.find(child => child.kind === 't3');
+  if (!postListing || !postListing.data) {
+    return null;
+  }
+  
+  const postData = postListing.data;
+  const selftext = truncateText(normalizeRedditText(postData.selftext || ''), REDDIT_POST_CHAR_LIMIT);
+  const commentListing = Array.isArray(json[1]?.data?.children) ? json[1].data.children : [];
+  const comments = selectTopComments(commentListing, REDDIT_COMMENT_LIMIT);
+  
+  return {
+    title: postData.title || 'Untitled Reddit Post',
+    subreddit: postData.subreddit || '',
+    author: postData.author || '',
+    score: postData.score || 0,
+    selftext,
+    isSelf: !!postData.is_self,
+    postUrl: postData.url_overridden_by_dest || postData.url || '',
+    commentCount: postData.num_comments || commentListing.length,
+    comments
+  };
+}
+
+function selectTopComments(children, limit) {
+  const comments = [];
+  
+  for (const child of children) {
+    if (!child || child.kind !== 't1' || !child.data) {
+      continue;
+    }
+    const data = child.data;
+    if (!data.body || data.body === '[deleted]' || data.body === '[removed]') {
+      continue;
+    }
+    
+    const body = truncateText(normalizeRedditText(data.body), REDDIT_COMMENT_CHAR_LIMIT);
+    if (!body) {
+      continue;
+    }
+    
+    comments.push({
+      author: data.author || 'unknown',
+      score: typeof data.score === 'number' ? data.score : 0,
+      body
+    });
+  }
+  
+  comments.sort((a, b) => (b.score || 0) - (a.score || 0));
+  return comments.slice(0, limit);
+}
+
+function buildRedditSummaryInput(thread) {
+  const sections = [];
+  sections.push('Summarize the following Reddit thread, focusing on the main viewpoints, consensus, and disagreements voiced in the top community comments.');
+  sections.push(`Thread title: ${thread.title}`);
+  
+  const metaParts = [];
+  if (thread.subreddit) metaParts.push(`Subreddit: r/${thread.subreddit}`);
+  if (thread.author) metaParts.push(`Author: u/${thread.author}`);
+  metaParts.push(`Upvotes: ${thread.score}`);
+  metaParts.push(`Comments analyzed: ${thread.comments.length}/${thread.commentCount}`);
+  sections.push(metaParts.join(' | '));
+  
+  if (thread.selftext) {
+    sections.push('Original post:');
+    sections.push(thread.selftext);
+  } else if (!thread.isSelf && thread.postUrl) {
+    sections.push(`Original post links to: ${thread.postUrl}`);
+  }
+  
+  if (thread.comments.length) {
+    sections.push('Top community comments:');
+    thread.comments.forEach((comment, index) => {
+      sections.push(`${index + 1}. u/${comment.author} (${comment.score} upvotes)\n${comment.body}`);
+    });
+  } else {
+    sections.push('Top community comments: None available.');
+  }
+  
+  return sections.join('\n\n');
+}
+
+async function handleSummarizeRedditPost(message, sender) {
+  const { url } = message;
+  
+  console.log('[Reddit] Summarize request for:', url);
+  
+  const apiInfo = buildRedditApiUrl(url);
+  if (!apiInfo) {
+    return {
+      status: 'error',
+      error: 'INVALID_REDDIT_URL',
+      message: 'Not a Reddit post link.'
+    };
+  }
+  
+  let redditJson;
+  try {
+    const response = await fetch(apiInfo.apiUrl, {
+      headers: {
+        'Accept': 'application/json'
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+    
+    redditJson = await response.json();
+  } catch (error) {
+    console.error('[Reddit] Failed to fetch thread:', error);
+    return {
+      status: 'error',
+      error: 'REDDIT_FETCH_FAILED',
+      message: 'Could not retrieve Reddit thread data.'
+    };
+  }
+  
+  const thread = extractRedditThread(redditJson);
+  if (!thread) {
+    console.warn('[Reddit] No thread data extracted.');
+    return {
+      status: 'error',
+      error: 'REDDIT_PARSE_FAILED',
+      message: 'Unable to parse Reddit discussion.'
+    };
+  }
+  
+  console.log('[Reddit] Extracted', thread.comments.length, 'top comments for summarization');
+  
+  const summaryInput = buildRedditSummaryInput(thread);
+  
+  return await handleSummarizeContent({
+    url: url,
+    title: `Reddit: ${thread.title}`,
+    textContent: summaryInput
+  }, sender);
+}
+
+// ========================================
 // YOUTUBE CAPTION HELPERS
 // ========================================
 
@@ -960,6 +1178,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleSummarizeContent(message, sender)
       .then(result => sendResponse(result))
       .catch(error => sendResponse({ error: error.message }));
+    return true;
+  }
+  
+  if (message.type === 'SUMMARIZE_REDDIT_POST') {
+    handleSummarizeRedditPost(message, sender)
+      .then(result => sendResponse(result))
+      .catch(error => {
+        console.error('[Reddit] Handler failure:', error);
+        sendResponse({
+          status: 'error',
+          error: error?.message || 'Reddit summarization failed.'
+        });
+      });
     return true;
   }
   

@@ -17,6 +17,7 @@
 
 ## Testing Guidelines
 - Follow `TESTING_GUIDE.md` to run Direct API and Method 4 scenarios. Confirm the three sample IDs succeed before merging caption or hover changes.
+- For Reddit hovers, test against a few hot posts on `reddit.com` (self and link posts). Ensure hover triggers the “Summarizing Reddit discussion…” state and produces comment-driven output; capture console errors if the thread has no accessible comments.
 - After enabling the intercept, exercise hover previews on a live YouTube tab, note browser/version, and record whether the service worker was reloaded.
 - Store observations in the `TEST_RESULTS_*.md` templates or a similarly named markdown log.
 
