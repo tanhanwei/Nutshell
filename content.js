@@ -26,6 +26,12 @@
     'x.com',
     'www.x.com'
   ]);
+  const YOUTUBE_HOSTS = new Set([
+    'youtube.com',
+    'www.youtube.com',
+    'm.youtube.com',
+    'music.youtube.com'
+  ]);
   
   // State management
   let currentHoverTimeout = null;
@@ -1059,6 +1065,33 @@
     }
   }
   
+  function extractYouTubeVideoId(url) {
+    if (!url) return null;
+    const patterns = [
+      /(?:youtube\.com\/(watch\?v=|embed\/)|youtu\.be\/)([^&\n?#]+)/,
+      /youtube\.com\/shorts\/([^&\n?#]+)/,
+      /[?&]v=([^&\n?#]+)/
+    ];
+    for (const pattern of patterns) {
+      const match = url.match(pattern);
+      if (match && match[2]) return match[2];
+      if (match && match[1] && pattern.source.includes('shorts')) return match[1];
+      if (!pattern.source.includes('shorts') && match && match[1]) return match[1];
+    }
+    return null;
+  }
+  
+  function isYouTubeVideoLink(url) {
+    try {
+      const parsed = new URL(url, window.location.origin);
+      if (!YOUTUBE_HOSTS.has(parsed.hostname.toLowerCase())) return false;
+      const videoId = extractYouTubeVideoId(url);
+      return !!videoId;
+    } catch {
+      return false;
+    }
+  }
+  
   // Handle mouseover
   function handleMouseOver(e) {
     const link = findLink(e.target);
@@ -1136,13 +1169,24 @@
         // Ignore parsing issues and proceed
       }
     }
+    if (IS_YOUTUBE) {
+      try {
+        const parsedUrl = new URL(url, window.location.origin);
+        if (YOUTUBE_HOSTS.has(parsedUrl.hostname.toLowerCase()) && !isYouTubeVideoLink(url)) {
+          return;
+        }
+      } catch (error) {
+        return;
+      }
+    }
     const shortUrl = getShortUrl(url);
-    
+
     // Check if this is a YouTube thumbnail first
     if (IS_YOUTUBE && isYouTubeThumbnail(e.target)) {
       console.log(`🎬 YOUTUBE THUMBNAIL: "${shortUrl}" (will trigger in ${HOVER_DELAY}ms)`);
-      
-      const isSameVideo = currentlyProcessingUrl === url;
+      const videoId = extractYouTubeVideoId(url);
+      const canonicalUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : url;
+      const isSameVideo = currentlyProcessingUrl === canonicalUrl;
       if (isSameVideo) {
         console.log('[YouTube] ⏭️  Already processing/displaying this video, ignoring re-hover');
         return;
@@ -1159,21 +1203,21 @@
         return;
       }
       
-      const isSwitch = currentlyProcessingUrl && currentlyProcessingUrl !== url;
+      const isSwitch = currentlyProcessingUrl && currentlyProcessingUrl !== canonicalUrl;
       if (isSwitch) {
-        console.log(`[YouTube] 🔴 SWITCHING FROM ${currentlyProcessingUrl} TO ${url}`);
-        const oldVideoId = extractVideoId(currentlyProcessingUrl);
-        const newVideoId = extractVideoId(url);
+        console.log(`[YouTube] 🔴 SWITCHING FROM ${currentlyProcessingUrl} TO ${canonicalUrl}`);
+        const oldVideoId = extractYouTubeVideoId(currentlyProcessingUrl);
         chrome.runtime.sendMessage({
           action: 'ABORT_YOUTUBE_SUMMARY',
           videoId: oldVideoId,
-          newVideoId: newVideoId
+          newVideoId: videoId
         }, response => {
           console.log(`[YouTube] Abort response:`, response);
         });
       }
       
-      currentlyProcessingUrl = url;
+      currentlyProcessingUrl = canonicalUrl;
+      link.__hoverCanonicalUrl = canonicalUrl;
       
       // 2. Clear old hover timeout
       if (currentHoverTimeout) {
@@ -1182,7 +1226,7 @@
       }
       
       // 3. Clear this URL's previous timeout if any
-      const oldTimeout = hoverTimeouts.get(url);
+      const oldTimeout = hoverTimeouts.get(canonicalUrl);
       if (oldTimeout) {
         clearTimeout(oldTimeout);
       }
@@ -1197,15 +1241,60 @@
       
       // Schedule hover (DON'T set currentlyProcessingUrl yet - that happens when timeout fires!)
       const hoverTimeout = setTimeout(() => {
-        hoverTimeouts.delete(url); // Clean up
-        handleYouTubeThumbnailHover(thumbnailElement, link, url);
+        hoverTimeouts.delete(canonicalUrl); // Clean up
+        handleYouTubeVideoHover(thumbnailElement, link, canonicalUrl);
       }, HOVER_DELAY);
       
       // Store timeout for this URL
-      hoverTimeouts.set(url, hoverTimeout);
+      hoverTimeouts.set(canonicalUrl, hoverTimeout);
       currentHoverTimeout = hoverTimeout; // Keep for compatibility
       
       return; // Don't process as regular link
+    }
+    
+    if (IS_YOUTUBE && isYouTubeVideoLink(url)) {
+      const videoId = extractYouTubeVideoId(url);
+      if (!videoId) return;
+      const canonicalUrl = `https://www.youtube.com/watch?v=${videoId}`;
+      link.__hoverCanonicalUrl = canonicalUrl;
+      const isSameVideo = currentlyProcessingUrl === canonicalUrl;
+      if (isSameVideo) {
+        console.log('[YouTube] ⏭️  Already processing/displaying this video link, ignoring re-hover');
+        return;
+      }
+      const isSwitch = currentlyProcessingUrl && currentlyProcessingUrl !== canonicalUrl;
+      if (isSwitch) {
+        console.log(`[YouTube] 🔴 SWITCHING FROM ${currentlyProcessingUrl} TO ${canonicalUrl}`);
+        const oldVideoId = extractYouTubeVideoId(currentlyProcessingUrl);
+        chrome.runtime.sendMessage({
+          action: 'ABORT_YOUTUBE_SUMMARY',
+          videoId: oldVideoId,
+          newVideoId: videoId
+        }, response => {
+          console.log(`[YouTube] Abort response:`, response);
+        });
+      }
+      currentlyProcessingUrl = canonicalUrl;
+      if (currentHoverTimeout) {
+        clearTimeout(currentHoverTimeout);
+        currentHoverTimeout = null;
+      }
+      const oldTimeout = hoverTimeouts.get(canonicalUrl);
+      if (oldTimeout) {
+        clearTimeout(oldTimeout);
+      }
+      if (hideTimeout) {
+        clearTimeout(hideTimeout);
+        hideTimeout = null;
+      }
+      currentHoveredElement = link;
+      const hoverTimeout = setTimeout(() => {
+        hoverTimeouts.delete(canonicalUrl);
+        handleYouTubeVideoHover(link, link, canonicalUrl);
+      }, HOVER_DELAY);
+      hoverTimeouts.set(canonicalUrl, hoverTimeout);
+      currentHoverTimeout = hoverTimeout;
+      return;
     }
     
     // Don't re-trigger if we're already processing this exact URL
@@ -1704,127 +1793,6 @@
   /**
    * Create YouTube summary overlay inside thumbnail
    */
-  function createYouTubeOverlay(thumbnailElement) {
-    // thumbnailElement is already the container (ytd-thumbnail, ytd-rich-item-renderer, etc.)
-    const container = thumbnailElement;
-    
-    if (!container) {
-      console.warn('[YouTube] No container provided');
-      return null;
-    }
-    
-    // Create overlay container
-    const overlay = document.createElement('div');
-    overlay.className = 'yt-summary-overlay';
-    overlay.style.cssText = `
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background: rgba(0, 0, 0, 0.85);
-      z-index: 1000;
-      display: flex;
-      flex-direction: column;
-      padding: 12px;
-      box-sizing: border-box;
-      opacity: 0;
-      transition: opacity 0.3s ease;
-      pointer-events: none;
-    `;
-    
-    // Create scrollable content area
-    const contentArea = document.createElement('div');
-    contentArea.className = 'yt-summary-content';
-    contentArea.style.cssText = `
-      flex: 1;
-      overflow-y: auto;
-      overflow-x: hidden;
-      color: #fff;
-      font-size: 13px;
-      line-height: 1.5;
-      padding-right: 8px;
-      pointer-events: auto;
-    `;
-    
-    // Custom scrollbar styling
-    const style = document.createElement('style');
-    style.textContent = `
-      .yt-summary-content::-webkit-scrollbar {
-        width: 6px;
-      }
-      .yt-summary-content::-webkit-scrollbar-track {
-        background: rgba(255, 255, 255, 0.1);
-        border-radius: 3px;
-      }
-      .yt-summary-content::-webkit-scrollbar-thumb {
-        background: rgba(255, 255, 255, 0.3);
-        border-radius: 3px;
-      }
-      .yt-summary-content::-webkit-scrollbar-thumb:hover {
-        background: rgba(255, 255, 255, 0.5);
-      }
-      .yt-summary-content ul {
-        margin: 8px 0;
-        padding-left: 20px;
-        list-style-type: disc;
-      }
-      .yt-summary-content li {
-        margin-bottom: 6px;
-      }
-      .yt-summary-content strong {
-        font-weight: 600;
-        color: #fff;
-      }
-      .yt-summary-content p {
-        margin: 8px 0;
-      }
-    `;
-    document.head.appendChild(style);
-    
-    overlay.appendChild(contentArea);
-    
-    // Make container position relative if not already
-    const containerStyle = window.getComputedStyle(container);
-    if (containerStyle.position === 'static') {
-      container.style.position = 'relative';
-    }
-    
-    container.appendChild(overlay);
-    
-    // Fade in
-    setTimeout(() => {
-      overlay.style.opacity = '1';
-    }, 10);
-    
-    return { overlay, contentArea };
-  }
-  
-  
-  
-  /**
-   * Extract video ID from a YouTube URL
-   */
-  function extractVideoId(url) {
-    if (!url) return null;
-    
-    const patterns = [
-      /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\n?#]+)/,
-      /youtube\.com\/shorts\/([^&\n?#]+)/,
-      /\/vi\/([^\/]+)/,
-      /\/vi_webp\/([^\/]+)/,
-      /[?&]v=([^&\n?#]+)/,
-    ];
-    
-    for (const pattern of patterns) {
-      const match = url.match(pattern);
-      if (match && match[1]) {
-        return match[1];
-      }
-    }
-    
-    return null;
-  }
   
   /**
    * Check if an element is a YouTube thumbnail
@@ -1883,23 +1851,20 @@
     });
   }
 
-  /**
-   * Handle YouTube thumbnail hover - extract video ID and request caption summary
-   */
-  async function handleYouTubeThumbnailHover(thumbnailElement, linkElement, url) {
-    console.log('[YouTube] Thumbnail hover detected:', url);
-    const videoId = extractVideoId(url);
+  async function handleYouTubeVideoHover(anchorElement, linkElement, url) {
+    console.log('[YouTube] Video hover detected:', url);
+    const videoId = extractYouTubeVideoId(url);
     if (!videoId) {
       console.warn('[YouTube] Could not extract video ID from:', url);
       currentlyProcessingUrl = null;
       return;
     }
     currentlyProcessingUrl = url;
-    processingElement = linkElement;
-    currentHoveredElement = linkElement;
+    processingElement = linkElement || anchorElement;
+    currentHoveredElement = anchorElement || linkElement;
     const tooltipOptions = { placement: 'right' };
     if (displayMode === 'tooltip' || displayMode === 'both') {
-      showTooltip(linkElement, '<div style="text-align:center;padding:16px;opacity:0.75;">Capturing captions…</div>', url, tooltipOptions);
+      showTooltip(anchorElement || linkElement, '<div style="text-align:center;padding:16px;opacity:0.75;">Capturing captions…</div>', url, tooltipOptions);
     }
     const summaryTimeout = setTimeout(() => {
       if (currentlyProcessingUrl === url) {
@@ -1908,7 +1873,7 @@
           videoId
         });
         if (displayMode === 'tooltip' || displayMode === 'both') {
-          showTooltip(linkElement, '<div style="padding:10px;background:#fee;border-radius:8px;">Summary timed out. Try hovering again.</div>', url, tooltipOptions);
+          showTooltip(anchorElement || linkElement, '<div style="padding:10px;background:#fee;border-radius:8px;">Summary timed out. Try hovering again.</div>', url, tooltipOptions);
         }
         currentlyProcessingUrl = null;
       }
@@ -1918,14 +1883,14 @@
     } catch (error) {
       console.warn('[YouTube] Captions not ready:', error.message);
       if (displayMode === 'tooltip' || displayMode === 'both') {
-        showTooltip(linkElement, '<div style="padding:10px;background:#fee;border-radius:8px;">Captions not available yet. Hover again after the preview loads.</div>', url, tooltipOptions);
+        showTooltip(anchorElement || linkElement, '<div style="padding:10px;background:#fee;border-radius:8px;">Captions not available yet. Hover again after the preview loads.</div>', url, tooltipOptions);
       }
       currentlyProcessingUrl = null;
       clearTimeout(summaryTimeout);
       return;
     }
     if (displayMode === 'tooltip' || displayMode === 'both') {
-      showTooltip(linkElement, '<div style="text-align:center;padding:16px;opacity:0.75;">Generating summary…</div>', url, tooltipOptions);
+      showTooltip(anchorElement || linkElement, '<div style="text-align:center;padding:16px;opacity:0.75;">Generating summary…</div>', url, tooltipOptions);
     }
     chrome.runtime.sendMessage({
       action: 'GET_YOUTUBE_SUMMARY',
@@ -1936,7 +1901,7 @@
       if (chrome.runtime.lastError) {
         console.error('[YouTube] Runtime error:', chrome.runtime.lastError);
         if (displayMode === 'tooltip' || displayMode === 'both') {
-          showTooltip(linkElement, '<div style="padding:10px;background:#fee;border-radius:8px;">Error generating summary.</div>', url, tooltipOptions);
+          showTooltip(anchorElement || linkElement, '<div style="padding:10px;background:#fee;border-radius:8px;">Error generating summary.</div>', url, tooltipOptions);
         }
         currentlyProcessingUrl = null;
         return;
@@ -1948,7 +1913,7 @@
       if (response.status === 'complete') {
         const summary = response.summary || 'No summary generated';
         const formatted = formatAISummary(summary);
-        showTooltip(linkElement, formatted, url, tooltipOptions);
+        showTooltip(anchorElement || linkElement, formatted, url, tooltipOptions);
         if (displayMode === 'sidepanel' || displayMode === 'both') {
           chrome.runtime.sendMessage({
             action: 'DISPLAY_CACHED_SUMMARY',
@@ -1961,7 +1926,6 @@
         return;
       }
       if (response.status === 'streaming') {
-        // Streaming updates will arrive via STREAMING_UPDATE listener
         return;
       }
       if (response.error) {
@@ -1969,11 +1933,10 @@
           ? 'No captions available for this video yet.'
           : `Error: ${response.error}`;
         if (displayMode === 'tooltip' || displayMode === 'both') {
-          showTooltip(linkElement, `<div style="padding:10px;background:#fee;border-radius:8px;">${errorMsg}</div>`, url, tooltipOptions);
+          showTooltip(anchorElement || linkElement, `<div style="padding:10px;background:#fee;border-radius:8px;">${errorMsg}</div>`, url, tooltipOptions);
         }
         currentlyProcessingUrl = null;
         processingElement = null;
-        return;
       }
     });
   }
