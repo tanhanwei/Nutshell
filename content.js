@@ -42,6 +42,7 @@
   let pendingTwitterThreadId = null;
   let pendingTwitterStartedAt = 0;
   let displayMode = 'both';
+  let currentTooltipPlacement = 'auto';
   let currentHoveredElement = null;
   let isMouseInTooltip = false;
   let displayTimes = new Map(); // Track when each URL was displayed (url -> timestamp)
@@ -125,8 +126,8 @@
   }
   
   // Position tooltip
-  function positionTooltip(element) {
-    if (!tooltip) return;
+  function positionTooltip(element, placement = 'auto') {
+    if (!tooltip || !element) return;
     
     const rect = element.getBoundingClientRect();
     const tooltipRect = tooltip.getBoundingClientRect();
@@ -134,26 +135,45 @@
     const viewportHeight = window.innerHeight;
     const gap = 12;
     
-    let top, left;
+    let top = rect.top;
+    let left = rect.left;
     
-    if (rect.bottom + gap + tooltipRect.height < viewportHeight) {
-      top = rect.bottom + gap;
-    } else if (rect.top - gap - tooltipRect.height > 0) {
-      top = rect.top - gap - tooltipRect.height;
+    if (placement === 'right') {
+      left = rect.right + gap;
+      if (left + tooltipRect.width > viewportWidth - gap) {
+        left = rect.left - gap - tooltipRect.width;
+      }
+      if (left < gap) {
+        left = Math.max(gap, rect.left);
+      }
+      top = Math.max(gap, Math.min(rect.top, viewportHeight - tooltipRect.height - gap));
+    } else if (placement === 'left') {
+      left = rect.left - gap - tooltipRect.width;
+      if (left < gap) {
+        left = rect.right + gap;
+      }
+      if (left + tooltipRect.width > viewportWidth - gap) {
+        left = Math.max(gap, viewportWidth - tooltipRect.width - gap);
+      }
+      top = Math.max(gap, Math.min(rect.top, viewportHeight - tooltipRect.height - gap));
     } else {
-      top = Math.max(gap, (viewportHeight - tooltipRect.height) / 2);
+      if (rect.bottom + gap + tooltipRect.height < viewportHeight) {
+        top = rect.bottom + gap;
+      } else if (rect.top - gap - tooltipRect.height > 0) {
+        top = rect.top - gap - tooltipRect.height;
+      } else {
+        top = Math.max(gap, (viewportHeight - tooltipRect.height) / 2);
+      }
+      left = rect.left;
+      if (left + tooltipRect.width > viewportWidth - gap) {
+        left = Math.max(gap, rect.right - tooltipRect.width);
+      }
+      if (left < gap) {
+        left = gap;
+      }
     }
     
-    left = rect.left;
-    
-    if (left + tooltipRect.width > viewportWidth - gap) {
-      left = Math.max(gap, rect.right - tooltipRect.width);
-    }
-    
-    if (left < gap) {
-      left = gap;
-    }
-    
+    top = Math.max(gap, Math.min(top, viewportHeight - tooltipRect.height - gap));
     tooltip.style.top = `${top}px`;
     tooltip.style.left = `${left}px`;
   }
@@ -878,13 +898,14 @@
   }
   
   // Show tooltip
-  function showTooltip(element, content, url) {
+  function showTooltip(element, content, url, options = {}) {
     if (displayMode === 'panel') return;
     
+    const placement = options.placement || 'auto';
+    currentTooltipPlacement = placement;
     const shortUrl = url ? getShortUrl(url) : 'unknown';
     debugLog(`📤 SHOW TOOLTIP: "${shortUrl}" (was showing: "${currentlyDisplayedUrl ? getShortUrl(currentlyDisplayedUrl) : 'none'}")`);
     
-    // Cancel any pending hide
     clearTimeout(hideTimeout);
     hideTimeout = null;
     
@@ -893,12 +914,11 @@
     tooltipEl.style.display = 'block';
     attachTooltipDismissHandlers();
     
-    // Track what URL is currently displayed
     currentlyDisplayedUrl = url;
     
-    positionTooltip(element);
+    const anchor = element || processingElement || currentHoveredElement;
+    positionTooltip(anchor, placement);
     
-    // Record display time for this URL (for protection window)
     if (url) {
       displayTimes.set(url, Date.now());
     }
@@ -927,6 +947,7 @@
       currentlyProcessingUrl = null;
       processingElement = null;
       currentHoveredElement = null;
+      currentTooltipPlacement = 'auto';
     }
   }
   
@@ -959,10 +980,9 @@
       tooltip.innerHTML = content;
       tooltip.style.opacity = '1';
       
-      // Reposition in case size changed (use processingElement if currentHoveredElement is gone)
       const elementForPositioning = currentHoveredElement || processingElement;
       if (elementForPositioning) {
-        positionTooltip(elementForPositioning);
+        positionTooltip(elementForPositioning, currentTooltipPlacement);
       }
     }
   }
@@ -1877,8 +1897,9 @@
     currentlyProcessingUrl = url;
     processingElement = linkElement;
     currentHoveredElement = linkElement;
+    const tooltipOptions = { placement: 'right' };
     if (displayMode === 'tooltip' || displayMode === 'both') {
-      showTooltip(linkElement, '<div style="text-align:center;padding:16px;opacity:0.75;">Capturing captions…</div>', url);
+      showTooltip(linkElement, '<div style="text-align:center;padding:16px;opacity:0.75;">Capturing captions…</div>', url, tooltipOptions);
     }
     const summaryTimeout = setTimeout(() => {
       if (currentlyProcessingUrl === url) {
@@ -1887,7 +1908,7 @@
           videoId
         });
         if (displayMode === 'tooltip' || displayMode === 'both') {
-          showTooltip(linkElement, '<div style="padding:10px;background:#fee;border-radius:8px;">Summary timed out. Try hovering again.</div>', url);
+          showTooltip(linkElement, '<div style="padding:10px;background:#fee;border-radius:8px;">Summary timed out. Try hovering again.</div>', url, tooltipOptions);
         }
         currentlyProcessingUrl = null;
       }
@@ -1897,14 +1918,14 @@
     } catch (error) {
       console.warn('[YouTube] Captions not ready:', error.message);
       if (displayMode === 'tooltip' || displayMode === 'both') {
-        showTooltip(linkElement, '<div style="padding:10px;background:#fee;border-radius:8px;">Captions not available yet. Hover again after the preview loads.</div>', url);
+        showTooltip(linkElement, '<div style="padding:10px;background:#fee;border-radius:8px;">Captions not available yet. Hover again after the preview loads.</div>', url, tooltipOptions);
       }
       currentlyProcessingUrl = null;
       clearTimeout(summaryTimeout);
       return;
     }
     if (displayMode === 'tooltip' || displayMode === 'both') {
-      showTooltip(linkElement, '<div style="text-align:center;padding:16px;opacity:0.75;">Generating summary…</div>', url);
+      showTooltip(linkElement, '<div style="text-align:center;padding:16px;opacity:0.75;">Generating summary…</div>', url, tooltipOptions);
     }
     chrome.runtime.sendMessage({
       action: 'GET_YOUTUBE_SUMMARY',
@@ -1915,7 +1936,7 @@
       if (chrome.runtime.lastError) {
         console.error('[YouTube] Runtime error:', chrome.runtime.lastError);
         if (displayMode === 'tooltip' || displayMode === 'both') {
-          showTooltip(linkElement, '<div style="padding:10px;background:#fee;border-radius:8px;">Error generating summary.</div>', url);
+          showTooltip(linkElement, '<div style="padding:10px;background:#fee;border-radius:8px;">Error generating summary.</div>', url, tooltipOptions);
         }
         currentlyProcessingUrl = null;
         return;
@@ -1927,7 +1948,7 @@
       if (response.status === 'complete') {
         const summary = response.summary || 'No summary generated';
         const formatted = formatAISummary(summary);
-        showTooltip(linkElement, formatted, url);
+        showTooltip(linkElement, formatted, url, tooltipOptions);
         if (displayMode === 'sidepanel' || displayMode === 'both') {
           chrome.runtime.sendMessage({
             action: 'DISPLAY_CACHED_SUMMARY',
@@ -1948,7 +1969,7 @@
           ? 'No captions available for this video yet.'
           : `Error: ${response.error}`;
         if (displayMode === 'tooltip' || displayMode === 'both') {
-          showTooltip(linkElement, `<div style="padding:10px;background:#fee;border-radius:8px;">${errorMsg}</div>`, url);
+          showTooltip(linkElement, `<div style="padding:10px;background:#fee;border-radius:8px;">${errorMsg}</div>`, url, tooltipOptions);
         }
         currentlyProcessingUrl = null;
         processingElement = null;
