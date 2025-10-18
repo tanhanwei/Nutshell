@@ -47,12 +47,6 @@
   let displayTimes = new Map(); // Track when each URL was displayed (url -> timestamp)
   let hoverTimeouts = new Map(); // Track hover timeouts per URL (url -> timeout ID)
   
-  // YouTube-specific state
-  let currentYouTubeOverlay = null; // Track active YouTube overlay element
-  let currentYouTubeOverlayContentArea = null; // Track the content area within the overlay
-  let currentYouTubeOverlayUrl = null; // Track which URL the YouTube overlay is for
-  let overlayCreatedTime = 0; // Track when overlay was created (to prevent immediate mouseout)
-  
   // Twitter-specific state
   const twitterGqlCache = new Map(); // tweetId -> array of captured JSON blobs
   let twitterInterceptorInstalled = false;
@@ -1128,25 +1122,13 @@
     if (IS_YOUTUBE && isYouTubeThumbnail(e.target)) {
       console.log(`🎬 YOUTUBE THUMBNAIL: "${shortUrl}" (will trigger in ${HOVER_DELAY}ms)`);
       
-      // ADD COMPREHENSIVE DEBUGGING
-      console.log(`[DEBUG] Current states:
-    - currentlyProcessingUrl: ${currentlyProcessingUrl}
-    - currentYouTubeOverlayUrl: ${currentYouTubeOverlayUrl}
-    - New URL: ${url}
-    - URLs match: ${currentlyProcessingUrl === url || currentYouTubeOverlayUrl === url}`);
-      
-      // ✅ FIX: Prevent re-hovering the same video
-      const isSameVideo = (currentlyProcessingUrl === url) || (currentYouTubeOverlayUrl === url);
+      const isSameVideo = currentlyProcessingUrl === url;
       if (isSameVideo) {
         console.log('[YouTube] ⏭️  Already processing/displaying this video, ignoring re-hover');
         return;
       }
       
-      // Find ONLY the thumbnail element (not the entire video card)
-      // This ensures consistent sizing - overlay covers only thumbnail, not title/channel
       let thumbnailElement = e.target.closest('ytd-thumbnail');
-      
-      // If not found, try alternative thumbnail containers
       if (!thumbnailElement) {
         thumbnailElement = e.target.closest('ytd-video-preview') || 
                           e.target.closest('ytd-playlist-thumbnail');
@@ -1157,45 +1139,21 @@
         return;
       }
       
-      // Critical check: Are we switching videos?
-      const isSwitch = (currentlyProcessingUrl && currentlyProcessingUrl !== url) || 
-                       (currentYouTubeOverlayUrl && currentYouTubeOverlayUrl !== url);
-      
+      const isSwitch = currentlyProcessingUrl && currentlyProcessingUrl !== url;
       if (isSwitch) {
-        console.log(`[YouTube] 🔴 SWITCHING FROM ${currentlyProcessingUrl || currentYouTubeOverlayUrl} TO ${url}`);
-        
-        // Get old video ID
-        const oldUrl = currentlyProcessingUrl || currentYouTubeOverlayUrl;
-        const oldVideoId = extractVideoId(oldUrl);
+        console.log(`[YouTube] 🔴 SWITCHING FROM ${currentlyProcessingUrl} TO ${url}`);
+        const oldVideoId = extractVideoId(currentlyProcessingUrl);
         const newVideoId = extractVideoId(url);
-        
-        console.log(`[YouTube] 🛑 SENDING ABORT for old video: ${oldVideoId}`);
-        
-        // Send abort message
         chrome.runtime.sendMessage({
           action: 'ABORT_YOUTUBE_SUMMARY',
           videoId: oldVideoId,
-          newVideoId: newVideoId // Include new video for debugging
+          newVideoId: newVideoId
         }, response => {
           console.log(`[YouTube] Abort response:`, response);
         });
-        
-        // Remove old overlay
-        if (currentYouTubeOverlay) {
-          console.log(`[YouTube] Removing overlay for: ${currentYouTubeOverlayUrl}`);
-          removeYouTubeOverlay(true);
-          currentYouTubeOverlay = null;
-          currentYouTubeOverlayContentArea = null;
-        }
-        
-        // ✅ FIX: Don't clear states here - let them get overwritten below
-        // This prevents the null state window
       }
       
-      // ✅ FIX: Set new processing URL HERE (before timeout)
-      // This overwrites old state immediately, no gap
       currentlyProcessingUrl = url;
-      currentYouTubeOverlayUrl = null; // Clear overlay URL since we're starting fresh
       
       // 2. Clear old hover timeout
       if (currentHoverTimeout) {
@@ -1296,63 +1254,22 @@
     
     // Handle YouTube thumbnail mouseout
     if (IS_YOUTUBE && isYouTubeThumbnail(e.target)) {
-      // ✅ FIX: Check if mouse is actually leaving or just moving to child element
       const relatedTarget = e.relatedTarget;
       const thumbnailElement = e.target.closest('ytd-thumbnail') || 
                               e.target.closest('ytd-video-preview') || 
                               e.target.closest('ytd-playlist-thumbnail');
       
-      // If relatedTarget is still within the thumbnail, ignore this mouseout
       if (relatedTarget && thumbnailElement && thumbnailElement.contains(relatedTarget)) {
-        // Silently ignore - spurious mouseout from YouTube's DOM changes
         return;
       }
       
-      // If relatedTarget is our overlay, ignore this mouseout
-      if (relatedTarget && relatedTarget.closest && relatedTarget.closest('#youtube-summary-overlay')) {
-        // Silently ignore - mouse moved to our overlay
-        return;
-      }
-      
-      // If we got here, mouse is actually leaving - log it
-      console.log('[YouTube] Mouseout detected from thumbnail, url:', url);
-      console.log('[YouTube] currentlyProcessingUrl:', currentlyProcessingUrl);
-      
-      // Cancel this URL's pending hover timeout (if any)
       const pendingTimeout = hoverTimeouts.get(url);
       if (pendingTimeout) {
-        console.log('[YouTube] Canceling pending hover for:', url);
         clearTimeout(pendingTimeout);
         hoverTimeouts.delete(url);
       }
       
-      // CRITICAL: With pointer-events: none on overlay, the browser fires mouseout
-      // immediately when overlay appears (thinks mouse left thumbnail).
-      // Ignore mouseouts that happen within 500ms of overlay creation!
-      const timeSinceOverlayCreated = Date.now() - overlayCreatedTime;
-      if (timeSinceOverlayCreated < 500 && currentYouTubeOverlay) {
-        console.log('[YouTube] Ignoring mouseout (overlay just created', timeSinceOverlayCreated, 'ms ago)');
-        return;
-      }
-      
-      // Remove overlay if this thumbnail currently has it displayed
-      // Check BOTH currentlyProcessingUrl (for in-progress) AND currentYouTubeOverlayUrl (for completed)
-      // because currentlyProcessingUrl is cleared when summary completes, but overlay remains visible
-      const isCurrentThumbnail = (currentlyProcessingUrl === url) || (currentYouTubeOverlayUrl === url);
-      
-      if (isCurrentThumbnail && currentYouTubeOverlay) {
-        console.log('[YouTube] Mouse left current thumbnail (has overlay), removing it');
-        removeYouTubeOverlay();
-        
-        // ✅ FIX: Clear BOTH states when overlay is removed
-        // This ensures next hover detects as fresh, not a switch
-        currentlyProcessingUrl = null;
-        currentYouTubeOverlayUrl = null;
-        console.log('[YouTube] Cleared state after removing overlay');
-      } else {
-        console.log('[YouTube] Mouse left thumbnail (no overlay here), ignoring');
-      }
-      return;
+      // Allow general logic below to decide whether to hide tooltip; skip additional handling
     }
     
     // Check if we're actually leaving the link (not just moving to a child element or tooltip)
@@ -1657,21 +1574,15 @@
     
     if (message.type === 'STREAMING_UPDATE') {
       // Only accept updates for the EXACT URL we're currently processing
-      const isValid = (message.url === currentlyProcessingUrl) || 
-                      (message.url === currentYouTubeOverlayUrl && currentYouTubeOverlay);
-      
+      const isValid = message.url === currentlyProcessingUrl;
       if (!isValid) {
-        console.log(`[YouTube] REJECTED stale update for: ${message.url}`);
-        console.log(`  Currently processing: ${currentlyProcessingUrl}`);
-        console.log(`  Overlay URL: ${currentYouTubeOverlayUrl}`);
+        if (IS_YOUTUBE) {
+          console.log(`[YouTube] REJECTED stale update for: ${message.url}`);
+          console.log(`  Currently processing: ${currentlyProcessingUrl}`);
+        }
         return;
       }
-      
-      if (IS_YOUTUBE && currentYouTubeOverlay) {
-        updateYouTubeOverlay(message.content, message.url);
-      } else {
-        updateTooltipContent(message.content, message.url);
-      }
+      updateTooltipContent(message.content, message.url);
     }
     
     if (message.type === 'PROCESSING_STATUS') {
@@ -1869,70 +1780,7 @@
     return { overlay, contentArea };
   }
   
-  /**
-   * Remove YouTube overlay
-   * @param {boolean} immediate - If true, remove immediately without fade-out animation
-   */
-  function removeYouTubeOverlay(immediate = false) {
-    if (currentYouTubeOverlay) {
-      const overlay = currentYouTubeOverlay; // It's already the overlay element
-      
-      if (immediate) {
-        // Immediate removal (for switching between thumbnails)
-        if (overlay.parentNode) {
-          overlay.parentNode.removeChild(overlay);
-        }
-        console.log('[YouTube] Overlay removed immediately');
-      } else {
-        // Graceful fade-out (for mouse leaving)
-        overlay.style.opacity = '0';
-        setTimeout(() => {
-          if (overlay.parentNode) {
-            overlay.parentNode.removeChild(overlay);
-          }
-        }, 300);
-        console.log('[YouTube] Overlay fade-out started');
-      }
-      
-      currentYouTubeOverlay = null;
-      currentYouTubeOverlayContentArea = null;
-      currentYouTubeOverlayUrl = null;
-      overlayCreatedTime = 0; // Reset timestamp
-    }
-    
-    // Also forcefully remove any stray overlays that might still be in the DOM
-    if (immediate) {
-      const strayOverlays = document.querySelectorAll('.yt-summary-overlay');
-      strayOverlays.forEach(overlay => {
-        if (overlay.parentNode) {
-          overlay.parentNode.removeChild(overlay);
-        }
-      });
-      if (strayOverlays.length > 0) {
-        console.log(`[YouTube] Removed ${strayOverlays.length} stray overlay(s)`);
-      }
-    }
-  }
   
-  /**
-   * Update YouTube overlay content (only if it's for the right URL)
-   */
-  function updateYouTubeOverlay(content, forUrl) {
-    if (currentYouTubeOverlay && currentYouTubeOverlayContentArea) {
-      // Only update if this is for the current overlay's URL (prevent stale updates)
-      if (!forUrl || currentYouTubeOverlayUrl === forUrl) {
-        currentYouTubeOverlayContentArea.innerHTML = content;
-        // Only log non-streaming updates (streaming creates too much noise)
-        if (!content.startsWith('⏳') && !content.startsWith('🤖') && content.length > 100) {
-          console.log('[YouTube] Overlay updated (length:', content.length, ')');
-        }
-      } else {
-        console.log(`[YouTube] Ignoring update for ${forUrl}, current overlay is for ${currentYouTubeOverlayUrl}`);
-      }
-    } else {
-      console.warn('[YouTube] Cannot update overlay - currentYouTubeOverlay or contentArea is NULL');
-    }
-  }
   
   /**
    * Extract video ID from a YouTube URL
@@ -1982,204 +1830,131 @@
     return false;
   }
   
+  function waitForYouTubeCaptions(videoId) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener('youtube-captions-ready', captionListener);
+        clearTimeout(timeout);
+      };
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error('Timeout waiting for captions'));
+      }, 5000);
+      const captionListener = (event) => {
+        if (event.detail && event.detail.videoId === videoId) {
+          cleanup();
+          resolve();
+        }
+      };
+      window.addEventListener('youtube-captions-ready', captionListener);
+      if (window.hasYouTubeCaptions) {
+        window.hasYouTubeCaptions(videoId)
+          .then((hasCaptions) => {
+            if (hasCaptions) {
+              cleanup();
+              resolve();
+            }
+          })
+          .catch(() => {});
+      }
+    });
+  }
+
   /**
    * Handle YouTube thumbnail hover - extract video ID and request caption summary
    */
   async function handleYouTubeThumbnailHover(thumbnailElement, linkElement, url) {
     console.log('[YouTube] Thumbnail hover detected:', url);
-    
-    // Extract video ID
     const videoId = extractVideoId(url);
     if (!videoId) {
       console.warn('[YouTube] Could not extract video ID from:', url);
-      currentlyProcessingUrl = null; // Clear processing state
+      currentlyProcessingUrl = null;
       return;
     }
-    
-    console.log('[YouTube] Video ID:', videoId);
-    
-    // CRITICAL: Set currentlyProcessingUrl BEFORE any async operations
-    // This ensures streaming updates and response handling work correctly
     currentlyProcessingUrl = url;
-    
-    // Store element for positioning
     processingElement = linkElement;
-    
-    // Add timeout protection for stuck streams (30 seconds)
+    currentHoveredElement = linkElement;
+    if (displayMode === 'tooltip' || displayMode === 'both') {
+      showTooltip(linkElement, '<div style="text-align:center;padding:16px;opacity:0.75;">Capturing captions…</div>', url);
+    }
     const summaryTimeout = setTimeout(() => {
       if (currentlyProcessingUrl === url) {
-        console.log('[YouTube] Summary timeout - aborting');
         chrome.runtime.sendMessage({
           action: 'ABORT_YOUTUBE_SUMMARY',
-          videoId: videoId
+          videoId
         });
-        updateYouTubeOverlay('⚠️ Summary timed out (processing took too long)', url);
-        setTimeout(removeYouTubeOverlay, 3000);
+        if (displayMode === 'tooltip' || displayMode === 'both') {
+          showTooltip(linkElement, '<div style="padding:10px;background:#fee;border-radius:8px;">Summary timed out. Try hovering again.</div>', url);
+        }
         currentlyProcessingUrl = null;
       }
-    }, 30000); // 30 second timeout
-    
+    }, 30000);
     try {
-    
-    // Remove any existing overlay first (IMMEDIATE removal to prevent showing old content)
-    removeYouTubeOverlay(true); // true = immediate removal, no fade-out
-    
-    // Create YouTube overlay (pass the thumbnail container)
-    const overlayResult = createYouTubeOverlay(thumbnailElement);
-    currentYouTubeOverlayUrl = url; // Track which URL this overlay is for
-    overlayCreatedTime = Date.now(); // Track creation time to prevent immediate mouseout
-    
-    if (!overlayResult || !overlayResult.overlay) {
-      console.warn('[YouTube] Failed to create overlay, falling back to tooltip');
+      await waitForYouTubeCaptions(videoId);
+    } catch (error) {
+      console.warn('[YouTube] Captions not ready:', error.message);
       if (displayMode === 'tooltip' || displayMode === 'both') {
-        showTooltip(linkElement, 'Waiting for captions to load...', url);
+        showTooltip(linkElement, '<div style="padding:10px;background:#fee;border-radius:8px;">Captions not available yet. Hover again after the preview loads.</div>', url);
       }
-      return;
-    }
-    
-    // Extract the overlay element and content area from the result
-    currentYouTubeOverlay = overlayResult.overlay;
-    currentYouTubeOverlayContentArea = overlayResult.contentArea;
-    
-    console.log('[YouTube] Overlay created for:', url);
-    
-    // ✅ FIX: Add mouseout handler to overlay to detect when user leaves
-    currentYouTubeOverlay.addEventListener('mouseout', (e) => {
-      // Only trigger if actually leaving the overlay (not moving to child elements)
-      if (!currentYouTubeOverlay.contains(e.relatedTarget)) {
-        console.log('[YouTube] Mouse left overlay, removing it');
-        removeYouTubeOverlay();
-        currentlyProcessingUrl = null;
-        currentYouTubeOverlayUrl = null;
-        currentYouTubeOverlayContentArea = null;
-        console.log('[YouTube] Cleared state after leaving overlay');
-      }
-    });
-    
-    // Show initial loading message
-    updateYouTubeOverlay('⏳ Waiting for captions to load...', url);
-    
-    // Wait for captions to be captured (with timeout)
-    const waitForCaptions = new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Timeout waiting for captions'));
-      }, 5000); // 5 second timeout
-      
-      // Check if captions already exist (async check)
-      if (window.hasYouTubeCaptions) {
-        window.hasYouTubeCaptions(videoId).then(hasCapt => {
-          if (hasCapt) {
-            console.log('[YouTube] Captions already available for:', videoId);
-            clearTimeout(timeout);
-            resolve();
-          }
-        }).catch(() => {
-          // Ignore error, will wait for event
-        });
-      }
-      
-      // Listen for caption-ready event
-      const captionListener = (event) => {
-        if (event.detail && event.detail.videoId === videoId) {
-          console.log('[YouTube] Captions ready event received for:', videoId);
-          clearTimeout(timeout);
-          window.removeEventListener('youtube-captions-ready', captionListener);
-          resolve();
-        }
-      };
-      
-      window.addEventListener('youtube-captions-ready', captionListener);
-    });
-    
-    try {
-      // Wait for captions to be ready
-      await waitForCaptions;
-      console.log('[YouTube] Captions confirmed ready, requesting summary...');
-      
-      // Update overlay
-      updateYouTubeOverlay('🤖 Generating summary...', url);
-    } catch (error) {
-      console.warn('[YouTube] Timeout or error waiting for captions:', error);
-      updateYouTubeOverlay('⚠️ Captions not available (video preview may not have loaded)', url);
-      setTimeout(removeYouTubeOverlay, 3000); // Auto-remove after 3 seconds
       currentlyProcessingUrl = null;
-      return;
-    }
-    
-    // Now request the summary (captions are ready)
-    try {
-      chrome.runtime.sendMessage({
-        action: 'GET_YOUTUBE_SUMMARY',
-        videoId: videoId,
-        url: url
-      }, (response) => {
-        if (chrome.runtime.lastError) {
-          console.error('[YouTube] Runtime error:', chrome.runtime.lastError);
-          updateYouTubeOverlay('❌ Error: Extension context lost', url);
-          setTimeout(removeYouTubeOverlay, 3000);
-          currentlyProcessingUrl = null;
-          return;
-        }
-        
-        console.log('[YouTube] Response:', response.status, response.cached ? '(cached)' : '');
-        
-        if (response && response.status === 'complete') {
-          // Display the summary
-          const summary = response.summary || 'No summary generated';
-          const formatted = formatAISummary(summary);
-          
-          console.log('[YouTube] Displaying summary (length:', summary.length, ')');
-          
-          // Update state
-          currentlyDisplayedUrl = url;
-          displayTimes.set(url, Date.now());
-          
-          // Show summary in overlay
-          updateYouTubeOverlay(formatted, url);
-          
-          // Also send to side panel if enabled
-          if (displayMode === 'sidepanel' || displayMode === 'both') {
-            chrome.runtime.sendMessage({
-              action: 'DISPLAY_CACHED_SUMMARY',
-              summary: summary,
-              url: url
-            });
-          }
-          
-          // ✅ FIX: Don't clear state here - keep for switch detection
-          // Instead, update currentYouTubeOverlayUrl to track completed overlay
-          currentYouTubeOverlayUrl = url;
-          currentlyProcessingUrl = null; // Clear processing, but keep overlay URL
-          console.log('[YouTube] Summary complete, overlay active for:', url);
-        } else if (response && response.status === 'streaming') {
-          // Update overlay with streaming message
-          updateYouTubeOverlay('🤖 Generating summary...', url);
-          // Streaming updates will come through runtime.onMessage listener
-          // Keep currentlyProcessingUrl set so streaming updates work
-        } else if (response && response.error) {
-          const errorMsg = response.error === 'NO_CAPTIONS' 
-            ? '⚠️ No captions available for this video' 
-            : `❌ Error: ${response.error}`;
-          updateYouTubeOverlay(errorMsg, url);
-          setTimeout(removeYouTubeOverlay, 3000);
-          currentlyProcessingUrl = null;
-        } else {
-          console.warn('[YouTube] Unexpected response:', response);
-          updateYouTubeOverlay('❌ Error: Unexpected response', url);
-          setTimeout(removeYouTubeOverlay, 3000);
-          currentlyProcessingUrl = null;
-        }
-      });
-    } catch (error) {
-      console.error('[YouTube] Error requesting summary:', error);
-      updateYouTubeOverlay('❌ Error fetching captions', url);
-      setTimeout(removeYouTubeOverlay, 3000);
-      currentlyProcessingUrl = null;
-    }
-    } finally {
-      // Clear timeout when function completes (success or error)
       clearTimeout(summaryTimeout);
+      return;
     }
+    if (displayMode === 'tooltip' || displayMode === 'both') {
+      showTooltip(linkElement, '<div style="text-align:center;padding:16px;opacity:0.75;">Generating summary…</div>', url);
+    }
+    chrome.runtime.sendMessage({
+      action: 'GET_YOUTUBE_SUMMARY',
+      videoId,
+      url
+    }, (response) => {
+      clearTimeout(summaryTimeout);
+      if (chrome.runtime.lastError) {
+        console.error('[YouTube] Runtime error:', chrome.runtime.lastError);
+        if (displayMode === 'tooltip' || displayMode === 'both') {
+          showTooltip(linkElement, '<div style="padding:10px;background:#fee;border-radius:8px;">Error generating summary.</div>', url);
+        }
+        currentlyProcessingUrl = null;
+        return;
+      }
+      if (!response) {
+        currentlyProcessingUrl = null;
+        return;
+      }
+      if (response.status === 'complete') {
+        const summary = response.summary || 'No summary generated';
+        const formatted = formatAISummary(summary);
+        showTooltip(linkElement, formatted, url);
+        if (displayMode === 'sidepanel' || displayMode === 'both') {
+          chrome.runtime.sendMessage({
+            action: 'DISPLAY_CACHED_SUMMARY',
+            summary,
+            url
+          });
+        }
+        currentlyProcessingUrl = null;
+        processingElement = null;
+        return;
+      }
+      if (response.status === 'streaming') {
+        // Streaming updates will arrive via STREAMING_UPDATE listener
+        return;
+      }
+      if (response.error) {
+        const errorMsg = response.error === 'NO_CAPTIONS'
+          ? 'No captions available for this video yet.'
+          : `Error: ${response.error}`;
+        if (displayMode === 'tooltip' || displayMode === 'both') {
+          showTooltip(linkElement, `<div style="padding:10px;background:#fee;border-radius:8px;">${errorMsg}</div>`, url);
+        }
+        currentlyProcessingUrl = null;
+        processingElement = null;
+        return;
+      }
+    });
   }
   
 })();
