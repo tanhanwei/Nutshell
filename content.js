@@ -4,6 +4,7 @@
   // Configuration
   const HOVER_DELAY = 300;
   const IS_YOUTUBE = window.location.hostname.includes('youtube.com');
+  const IS_TWITTER = window.location.hostname.includes('twitter.com') || window.location.hostname.includes('x.com');
   const DEBUG_ENABLED = !IS_YOUTUBE; // Disable logs on YouTube to reduce clutter
   
   // Debug logging helper
@@ -19,6 +20,12 @@
     'np.reddit.com',
     'redd.it'
   ];
+  const TWITTER_HOSTS = new Set([
+    'twitter.com',
+    'www.twitter.com',
+    'x.com',
+    'www.x.com'
+  ]);
   
   // State management
   let currentHoverTimeout = null;
@@ -29,6 +36,11 @@
   let processingElement = null; // Track element being processed for positioning
   let tooltip = null;
   let tooltipCloseHandlerAttached = false;
+  let twitterHoverTimeout = null;
+  let currentTwitterArticle = null;
+  let currentTwitterTweetId = null;
+  let pendingTwitterThreadId = null;
+  let pendingTwitterStartedAt = 0;
   let displayMode = 'both';
   let currentHoveredElement = null;
   let isMouseInTooltip = false;
@@ -40,6 +52,12 @@
   let currentYouTubeOverlayContentArea = null; // Track the content area within the overlay
   let currentYouTubeOverlayUrl = null; // Track which URL the YouTube overlay is for
   let overlayCreatedTime = 0; // Track when overlay was created (to prevent immediate mouseout)
+  
+  // Twitter-specific state
+  const twitterGqlCache = new Map(); // tweetId -> array of captured JSON blobs
+  let twitterInterceptorInstalled = false;
+  
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   
   // Create tooltip
   function createTooltip() {
@@ -172,6 +190,677 @@
     document.removeEventListener('pointerdown', handleTooltipPointerDown, true);
     document.removeEventListener('keydown', handleTooltipKeyDown, true);
     tooltipCloseHandlerAttached = false;
+  }
+  
+  // ============ Twitter-Specific Helpers ============
+  
+  function ensureTwitterInterceptor() {
+    if (!IS_TWITTER || twitterInterceptorInstalled) return;
+    twitterInterceptorInstalled = true;
+    injectTwitterInterceptor();
+    window.addEventListener('message', handleTwitterPostMessage);
+  }
+  
+  function injectTwitterInterceptor() {
+    const script = document.createElement('script');
+    script.src = chrome.runtime.getURL('twitter/twitter-interceptor.js');
+    script.type = 'text/javascript';
+    script.onload = () => {
+      script.remove();
+    };
+    (document.head || document.documentElement).appendChild(script);
+  }
+  
+  function handleTwitterPostMessage(event) {
+    if (event.source !== window) return;
+    const data = event.data;
+    if (!data || data.source !== 'hover-preview-twitter' || data.type !== 'TWITTER_GQL_RESPONSE') return;
+    try {
+      const payload = data.payload;
+      if (!payload || !payload.json) return;
+      recordTwitterGqlPayload(payload.json);
+    } catch (error) {
+      console.warn('[Twitter] Failed to process intercepted payload:', error);
+    }
+  }
+  
+  function recordTwitterGqlPayload(json) {
+    const tweetIds = extractTweetIdsFromJson(json);
+    if (!tweetIds.length) return;
+    tweetIds.forEach((id) => {
+      if (!twitterGqlCache.has(id)) {
+        twitterGqlCache.set(id, []);
+      }
+      const entries = twitterGqlCache.get(id);
+      entries.push(json);
+      if (entries.length > 8) {
+        entries.shift();
+      }
+    });
+  }
+  
+  function extractTweetIdsFromJson(obj) {
+    const ids = new Set();
+    const visited = new Set();
+    
+    function walk(node) {
+      if (!node || typeof node !== 'object') return;
+      if (visited.has(node)) return;
+      visited.add(node);
+      
+      if (node.rest_id || node.restId) {
+        const id = String(node.rest_id || node.restId);
+        if (id) ids.add(id);
+      }
+      
+      if (node.legacy && node.legacy.id_str) {
+        ids.add(String(node.legacy.id_str));
+      }
+      
+      for (const key in node) {
+        if (!Object.prototype.hasOwnProperty.call(node, key)) continue;
+        const value = node[key];
+        if (typeof value === 'object' && value !== null) {
+          walk(value);
+        }
+      }
+    }
+    
+    try {
+      walk(obj);
+    } catch (error) {
+      console.warn('[Twitter] Failed to extract tweet IDs:', error);
+    }
+    
+    return Array.from(ids);
+  }
+  
+  function buildThreadFromCache(tweetId) {
+    if (!tweetId) return null;
+    const blobs = twitterGqlCache.get(tweetId);
+    if (!blobs || !blobs.length) return null;
+    
+    const nodesById = new Map();
+    blobs.forEach((blob) => {
+      collectTweetsFromPayload(blob, nodesById);
+    });
+    
+    if (!nodesById.size) return null;
+    
+    const rootNode = nodesById.get(tweetId) || Array.from(nodesById.values())[0];
+    if (!rootNode) return null;
+    
+    const conversationId = rootNode.conversationId || null;
+    const collectedNodes = [];
+    
+    nodesById.forEach((node) => {
+      if (conversationId && node.conversationId && node.conversationId !== conversationId) {
+        return;
+      }
+      collectedNodes.push(Object.assign({}, node));
+    });
+    
+    if (!collectedNodes.length) return null;
+    
+    collectedNodes.sort((a, b) => {
+      const aTime = a.timestamp || '';
+      const bTime = b.timestamp || '';
+      return aTime.localeCompare(bTime);
+    });
+    
+    const limitedNodes = collectedNodes.slice(0, 20);
+    if (!limitedNodes.some((node) => node.id === rootNode.id)) {
+      limitedNodes.unshift(Object.assign({}, rootNode));
+    }
+    limitedNodes.forEach((node, index) => {
+      node.order = index;
+    });
+    
+    return {
+      rootId: rootNode.id,
+      conversationId,
+      nodes: limitedNodes,
+      source: 'interceptor'
+    };
+  }
+  
+  function collectTweetsFromPayload(obj, map) {
+    const visited = new Set();
+    
+    function walk(node) {
+      if (!node || typeof node !== 'object') return;
+      if (visited.has(node)) return;
+      visited.add(node);
+      
+      const candidate = extractTweetCandidate(node);
+      if (candidate) {
+        const id = candidate.id;
+        if (!map.has(id) || (candidate.text && candidate.text.length > (map.get(id).text || '').length)) {
+          map.set(id, candidate);
+        }
+      }
+      
+      for (const key in node) {
+        if (!Object.prototype.hasOwnProperty.call(node, key)) continue;
+        const value = node[key];
+        if (typeof value === 'object' && value !== null) {
+          walk(value);
+        }
+      }
+    }
+    
+    walk(obj);
+  }
+  
+  function extractTweetCandidate(node) {
+    const result = resolveTweetResult(node);
+    if (!result) return null;
+    
+    const legacy = result.legacy || (result.tweet && result.tweet.legacy);
+    if (!legacy) return null;
+    
+    const id = result.rest_id || (legacy && legacy.id_str);
+    if (!id) return null;
+    
+    const userLegacy = (result.core && result.core.user_results && result.core.user_results.result && result.core.user_results.result.legacy) ||
+                       (result.author && result.author.legacy) ||
+                       null;
+    
+    const text = extractTweetText(result, legacy);
+    const timestamp = legacy.created_at ? new Date(legacy.created_at).toISOString() : null;
+    const conversationId = legacy.conversation_id_str || null;
+    const handle = userLegacy ? userLegacy.screen_name : (legacy && legacy.screen_name) || null;
+    const authorName = userLegacy ? userLegacy.name : null;
+    const avatarUrl = userLegacy ? userLegacy.profile_image_url_https : null;
+    const permalink = handle ? `https://x.com/${handle}/status/${id}` : (legacy.url || null);
+    const inReplyToId = legacy.in_reply_to_status_id_str ? String(legacy.in_reply_to_status_id_str) : null;
+    
+    const media = extractTweetMedia(legacy);
+    
+    return {
+      id: String(id),
+      conversationId: conversationId ? String(conversationId) : null,
+      authorName: authorName || null,
+      handle: handle ? `@${handle}` : null,
+      avatarUrl: avatarUrl || null,
+      timestamp,
+      permalink,
+      text,
+      media,
+      inReplyToId,
+      order: 0
+    };
+  }
+  
+  function resolveTweetResult(node) {
+    if (!node || typeof node !== 'object') return null;
+    if (node.__typename === 'Tweet') return node;
+    if (node.result && node.result.__typename === 'Tweet') return node.result;
+    if (node.tweet && node.tweet.__typename === 'Tweet') return node.tweet;
+    if (node.tweet_results && node.tweet_results.result && node.tweet_results.result.__typename === 'Tweet') return node.tweet_results.result;
+    if (node.itemContent && node.itemContent.tweet_results && node.itemContent.tweet_results.result) {
+      return node.itemContent.tweet_results.result;
+    }
+    if (node.item && node.item.itemContent && node.item.itemContent.tweet_results && node.item.itemContent.tweet_results.result) {
+      return node.item.itemContent.tweet_results.result;
+    }
+    if (node.content && node.content.tweetResult && node.content.tweetResult.result) {
+      return node.content.tweetResult.result;
+    }
+    if (node.content && node.content.itemContent && node.content.itemContent.tweet_results && node.content.itemContent.tweet_results.result) {
+      return node.content.itemContent.tweet_results.result;
+    }
+    if (node.tweetResult && node.tweetResult.result) {
+      return node.tweetResult.result;
+    }
+    if (node.tweet && node.tweet.core && node.tweet.core.tweet && node.tweet.core.tweet.legacy) {
+      return node.tweet.core.tweet;
+    }
+    return null;
+  }
+  
+  function extractTweetText(result, legacy) {
+    if (!legacy) return '';
+    if (result.note_tweet && result.note_tweet.note_tweet_results && result.note_tweet.note_tweet_results.result) {
+      const note = result.note_tweet.note_tweet_results.result;
+      if (note && note.text) {
+        return note.text;
+      }
+      if (note && Array.isArray(note.entity_set?.note_inline_media)) {
+        const textPieces = [];
+        if (note.entity_set?.richtext?.plain_text) {
+          textPieces.push(note.entity_set.richtext.plain_text);
+        }
+        if (note.entity_set?.media) {
+          note.entity_set.media.forEach((mediaItem) => {
+            if (mediaItem.alt_text) {
+              textPieces.push(`[Image: ${mediaItem.alt_text}]`);
+            }
+          });
+        }
+        if (textPieces.length) {
+          return textPieces.join('\n');
+        }
+      }
+    }
+    
+    if (legacy.full_text) {
+      return legacy.full_text;
+    }
+    
+    if (legacy.text) {
+      return legacy.text;
+    }
+    
+    return '';
+  }
+  
+  function extractTweetMedia(legacy) {
+    const media = [];
+    const entities = (legacy.extended_entities && legacy.extended_entities.media) ||
+                     (legacy.entities && legacy.entities.media) ||
+                     [];
+    
+    entities.forEach((item) => {
+      if (!item) return;
+      if (item.type === 'photo') {
+        media.push({
+          kind: 'photo',
+          urls: item.media_url_https ? [item.media_url_https] : []
+        });
+      } else if (item.type === 'animated_gif') {
+        const variants = (item.video_info && item.video_info.variants) || [];
+        const urls = variants.filter((variant) => variant.url).map((variant) => variant.url);
+        media.push({
+          kind: 'gif',
+          urls
+        });
+      } else if (item.type === 'video') {
+        const variants = (item.video_info && item.video_info.variants) || [];
+        const urls = variants.filter((variant) => variant.url).map((variant) => variant.url);
+        media.push({
+          kind: 'video',
+          urls,
+          poster: item.media_url_https || null
+        });
+      }
+    });
+    
+    return media;
+  }
+  
+  async function extractThreadFromDom(articleElement, tweetId) {
+    try {
+      await expandTwitterThread(articleElement);
+    } catch (error) {
+      console.warn('[Twitter] Expand thread failed:', error);
+    }
+    
+    const articles = collectThreadArticles(articleElement);
+    if (!articles.length) return null;
+    
+    const nodes = [];
+    articles.forEach((article, index) => {
+      const node = extractNodeFromArticle(article, index === 0, tweetId);
+      if (node) {
+        nodes.push(node);
+      }
+    });
+    
+    if (!nodes.length) return null;
+    
+    const deduped = new Map();
+    nodes.forEach((node) => {
+      const existing = deduped.get(node.id);
+      if (!existing || (node.text && node.text.length > (existing.text || '').length)) {
+        deduped.set(node.id, node);
+      }
+    });
+    const uniqueNodes = Array.from(deduped.values());
+    if (!uniqueNodes.length) return null;
+    
+    uniqueNodes.sort((a, b) => {
+      const aTime = a.timestamp || '';
+      const bTime = b.timestamp || '';
+      return aTime.localeCompare(bTime);
+    });
+    
+    const limitedNodes = uniqueNodes.slice(0, 12);
+    limitedNodes.forEach((node, index) => {
+      node.order = index;
+    });
+    
+    const rootNode = limitedNodes.find((node) => node.id === tweetId) || limitedNodes[0];
+    return {
+      rootId: rootNode.id,
+      conversationId: rootNode.conversationId || null,
+      nodes: limitedNodes,
+      source: 'dom'
+    };
+  }
+  
+  async function waitForPrimaryTwitterArticle(timeout = 8000) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      const article = document.querySelector('article[role="article"]');
+      if (article) return article;
+      await sleep(150);
+    }
+    return null;
+  }
+  
+  async function captureThreadForBackground(tweetId) {
+    const start = Date.now();
+    let lastPayload = null;
+    while (Date.now() - start < 12000) {
+      const cached = buildThreadFromCache(tweetId);
+      if (cached && cached.nodes && cached.nodes.length > 1) {
+        cached.source = 'background-intercept';
+        return cached;
+      }
+      const rootArticle = await waitForPrimaryTwitterArticle();
+      if (rootArticle) {
+        await sleep(400);
+        await preloadTwitterConversation(rootArticle, { passes: 6, skipRestore: true });
+        await sleep(500);
+        const payload = await extractThreadFromDom(rootArticle, tweetId);
+        if (payload && Array.isArray(payload.nodes) && payload.nodes.length > 1) {
+          payload.source = payload.source === 'dom' ? 'background-dom' : payload.source;
+          return payload;
+        }
+        if (payload) {
+          lastPayload = payload;
+        }
+      } else {
+        await sleep(400);
+      }
+    }
+    if (lastPayload && lastPayload.nodes && lastPayload.nodes.length) {
+      lastPayload.source = 'background-dom';
+    }
+    return lastPayload;
+  }
+
+  async function expandTwitterThread(articleElement, options = {}) {
+    const { skipRestore = false } = options || {};
+    const scrollElement = document.scrollingElement || document.documentElement;
+    const originalScrollTop = scrollElement.scrollTop;
+    const originalBehavior = document.documentElement.style.scrollBehavior;
+    document.documentElement.style.scrollBehavior = 'auto';
+    
+    const expandButtons = [];
+    const buttonSelector = 'div[role="button"], button, a[role="link"]';
+    const EXPAND_LABEL_REGEX = /(show|view|reveal).*(repl|thread|tweet)/i;
+    
+    try {
+      for (let i = 0; i < 6; i++) {
+        const candidates = Array.from(document.querySelectorAll(buttonSelector));
+        candidates.forEach((btn) => {
+          const text = (btn.textContent || '').trim();
+          if (text && EXPAND_LABEL_REGEX.test(text)) {
+            expandButtons.push(btn);
+          }
+        });
+        await sleep(160);
+      }
+      
+      expandButtons.forEach((btn) => {
+        try {
+          btn.click();
+        } catch (error) {}
+      });
+      
+      if (articleElement && articleElement.scrollIntoView) {
+        articleElement.scrollIntoView({ block: 'center', inline: 'center', behavior: 'auto' });
+      }
+      await sleep(260);
+    } finally {
+      if (!skipRestore) {
+        scrollElement.scrollTop = originalScrollTop;
+      }
+      document.documentElement.style.scrollBehavior = originalBehavior || '';
+    }
+  }
+  
+  async function preloadTwitterConversation(articleElement, options = {}) {
+    const { passes = 6, skipRestore = false } = options || {};
+    const scrollElement = document.scrollingElement || document.documentElement;
+    const originalScrollTop = scrollElement.scrollTop;
+    const originalBehavior = document.documentElement.style.scrollBehavior;
+    document.documentElement.style.scrollBehavior = 'auto';
+    
+    try {
+      for (let i = 0; i < passes; i++) {
+        await expandTwitterThread(articleElement, { skipRestore: true });
+        scrollElement.scrollBy(0, Math.max(window.innerHeight * 0.9, 600));
+        await sleep(420 + (i * 90));
+        await expandTwitterThread(articleElement, { skipRestore: true });
+        await sleep(220);
+      }
+      scrollElement.scrollTo(0, document.body.scrollHeight);
+      await sleep(600);
+      await expandTwitterThread(articleElement, { skipRestore: true });
+    } finally {
+      if (!skipRestore) {
+        scrollElement.scrollTop = originalScrollTop;
+      }
+      document.documentElement.style.scrollBehavior = originalBehavior || '';
+    }
+  }
+  
+  function collectThreadArticles(rootArticle) {
+    const articles = new Set();
+    if (rootArticle) {
+      articles.add(rootArticle);
+    }
+    
+    const timelineSelectors = [
+      '[aria-label^="Timeline:"]',
+      '[data-testid="primaryColumn"]',
+      'main[role="main"]'
+    ];
+    timelineSelectors.forEach((selector) => {
+      const container = document.querySelector(selector);
+      if (container) {
+        container.querySelectorAll('article[role="article"]').forEach((article) => articles.add(article));
+      }
+    });
+    
+    document.querySelectorAll('article[role="article"]').forEach((article) => articles.add(article));
+    
+    return Array.from(articles);
+  }
+  
+  function extractNodeFromArticle(article, isRoot, fallbackTweetId) {
+    const link = article.querySelector('a[href*="/status/"]');
+    const match = link && link.getAttribute('href') ? link.getAttribute('href').match(/status\/(\d+)/) : null;
+    const id = match ? match[1] : (isRoot && fallbackTweetId ? fallbackTweetId : null);
+    if (!id) return null;
+    
+    const handleEl = article.querySelector('div[dir="ltr"] span');
+    const handle = handleEl ? handleEl.textContent : null;
+    const textEl = article.querySelector('[data-testid="tweetText"]');
+    const text = textEl ? textEl.innerText.trim() : '';
+    const timeEl = article.querySelector('time');
+    const timestamp = timeEl ? timeEl.getAttribute('datetime') : null;
+    
+    const media = [];
+    const imageEls = Array.from(article.querySelectorAll('img'));
+    imageEls.forEach((img) => {
+      if (!img || !img.src) return;
+      const alt = img.alt || '';
+      const dimensions = img.width && img.height ? img.width * img.height : 0;
+      if (dimensions > 40000 || alt.toLowerCase().includes('image')) {
+        media.push({
+          kind: 'photo',
+          urls: [img.src]
+        });
+      }
+    });
+    
+    return {
+      id: String(id),
+      conversationId: null,
+      authorName: null,
+      handle: handle || null,
+      avatarUrl: null,
+      timestamp,
+      permalink: link ? link.href : null,
+      text,
+      media,
+      inReplyToId: null,
+      order: 0,
+      source: 'dom'
+    };
+  }
+  
+  function formatTwitterThreadForSummary(threadPayload) {
+    if (!threadPayload || !threadPayload.nodes || !threadPayload.nodes.length) {
+      return '';
+    }
+    
+    const lines = [];
+    threadPayload.nodes.forEach((node, index) => {
+      const indexLabel = index === 0 ? 'Original tweet' : `Reply ${index}`;
+      const authorLabel = node.handle || node.authorName || 'Unknown user';
+      let timestampText = '';
+      if (node.timestamp) {
+        const date = new Date(node.timestamp);
+        if (!Number.isNaN(date.getTime())) {
+          timestampText = date.toLocaleString();
+        }
+      }
+      lines.push(`${indexLabel} — ${authorLabel}${timestampText ? ` (${timestampText})` : ''}`);
+      if (node.text) {
+        lines.push(node.text);
+      }
+      if (node.media && node.media.length) {
+        const mediaSummary = node.media.map((item) => item.kind).join(', ');
+        lines.push(`[Media: ${mediaSummary}]`);
+      }
+      lines.push('');
+    });
+    
+    return lines.join('\n').trim();
+  }
+  
+  function clearTwitterState() {
+    currentTwitterArticle = null;
+    currentTwitterTweetId = null;
+    pendingTwitterThreadId = null;
+    pendingTwitterStartedAt = 0;
+  }
+  
+  function getTweetInfoFromArticle(article) {
+    if (!article) return null;
+    const link = article.querySelector('a[href*="/status/"]');
+    if (!link) return null;
+    const href = link.getAttribute('href') || '';
+    const match = href.match(/status\/(\d+)/);
+    if (!match) return null;
+    const id = match[1];
+    const displayUrl = link.href || (`https://x.com${href.startsWith('/') ? href : `/${href}`}`);
+    const canonicalUrl = `https://x.com/i/status/${id}`;
+    return { id, url: canonicalUrl, displayUrl };
+  }
+  
+  async function processTwitterHover(article, presetInfo = null) {
+    const info = presetInfo || getTweetInfoFromArticle(article);
+    if (!info) {
+      debugLog('[Twitter] No tweet info found for hovered article');
+      return;
+    }
+    
+    const { id, url, displayUrl } = info;
+    const requestUrl = displayUrl || url;
+    const shortUrl = getShortUrl(url);
+    
+    currentTwitterArticle = article;
+    currentTwitterTweetId = id;
+    currentlyProcessingUrl = url;
+    processingElement = article;
+    currentHoveredElement = article;
+    pendingTwitterThreadId = id;
+    pendingTwitterStartedAt = Date.now();
+    
+    if (displayMode === 'tooltip' || displayMode === 'both') {
+      showTooltip(article, '<div style="text-align:center;padding:16px;opacity:0.75;">Capturing thread…</div>', url);
+    }
+    
+    const isPermalinkView = window.location.pathname.includes('/status/');
+    let threadPayload = null;
+    
+    if (isPermalinkView) {
+      threadPayload = buildThreadFromCache(id);
+      if (!threadPayload) {
+        threadPayload = await extractThreadFromDom(article, id);
+      }
+    }
+    
+    if (!isPermalinkView && threadPayload && threadPayload.nodes && threadPayload.nodes.length < 2) {
+      threadPayload = null;
+    }
+    
+    if (!threadPayload || !threadPayload.nodes || threadPayload.nodes.length < 2) {
+      if (displayMode === 'tooltip' || displayMode === 'both') {
+        showTooltip(article, '<div style="text-align:center;padding:16px;opacity:0.75;">Opening conversation…</div>', url);
+      }
+      
+      for (let attempt = 0; attempt < 3 && (!threadPayload || !threadPayload.nodes || threadPayload.nodes.length < 2); attempt++) {
+        try {
+          const response = await chrome.runtime.sendMessage({
+            type: 'SCRAPE_TWITTER_THREAD',
+            url,
+            tweetId: id,
+            requestUrl
+          });
+          
+          if (response && response.status === 'ok' && response.payload && response.payload.nodes && response.payload.nodes.length) {
+            threadPayload = response.payload;
+            debugLog(`[Twitter] Background scrape returned ${threadPayload.nodes.length} tweets`);
+            break;
+          } else if (response && response.error) {
+            debugLog(`[Twitter] Background scrape error: ${response.error} (attempt ${attempt + 1})`);
+          }
+        } catch (error) {
+          debugLog('[Twitter] Background scrape failed', error);
+        }
+        await sleep(400 * (attempt + 1));
+      }
+    }
+    
+    if (!threadPayload || !threadPayload.nodes || threadPayload.nodes.length < 2) {
+      if (displayMode === 'tooltip' || displayMode === 'both') {
+        showTooltip(article, '<div style="padding:10px;background:#fee;border-radius:8px;">Unable to capture replies right now. Try again once the conversation loads.</div>', url);
+      }
+      currentlyProcessingUrl = null;
+      processingElement = null;
+      currentHoveredElement = null;
+      clearTwitterState();
+      return;
+    }
+    
+    debugLog(`[Twitter] Thread captured via ${threadPayload.source || 'unknown'} with ${threadPayload.nodes.length} tweets`);
+    const summaryInput = formatTwitterThreadForSummary(threadPayload);
+    const leadNode = threadPayload.nodes[0];
+    const title = leadNode && (leadNode.handle || leadNode.authorName)
+      ? `Thread by ${leadNode.handle || leadNode.authorName}`
+      : 'Twitter Thread';
+    
+    const result = await chrome.runtime.sendMessage({
+      type: 'SUMMARIZE_CONTENT',
+      url,
+      title,
+      textContent: summaryInput
+    });
+    
+    const isStillCurrent = (currentlyProcessingUrl === url);
+    handleSummaryResult(result, article, url, shortUrl, isStillCurrent);
+    pendingTwitterThreadId = null;
+    pendingTwitterStartedAt = 0;
+    if (!currentHoveredElement && (displayMode === 'tooltip' || displayMode === 'both')) {
+      scheduleHide(800, url);
+    }
   }
   
   // Schedule hiding tooltip with delay
@@ -347,16 +1036,92 @@
     }
   }
   
+  function isInternalTwitterLink(url) {
+    try {
+      const parsed = new URL(url, window.location.origin);
+      return TWITTER_HOSTS.has(parsed.hostname.toLowerCase());
+    } catch {
+      return false;
+    }
+  }
+  
   // Handle mouseover
   function handleMouseOver(e) {
     const link = findLink(e.target);
     if (!link) {
+      if (IS_TWITTER) {
+        const article = e.target.closest && e.target.closest('article[role="article"]');
+        if (article) {
+          const info = getTweetInfoFromArticle(article);
+          if (!info) return;
+          
+          ensureTwitterInterceptor();
+          
+          const isSameTweet = (currentTwitterTweetId === info.id && currentlyProcessingUrl === info.url);
+          if (isSameTweet) {
+            return;
+          }
+          
+          if (twitterHoverTimeout) {
+            clearTimeout(twitterHoverTimeout);
+            twitterHoverTimeout = null;
+          }
+          
+          twitterHoverTimeout = setTimeout(() => {
+            twitterHoverTimeout = null;
+            processTwitterHover(article, info);
+          }, HOVER_DELAY);
+          return;
+        }
+      }
       // Not a link, skip (don't log - too noisy on YouTube)
       return;
     }
     
-    const url = link.href;
+    let url = link.href;
+    let tweetInfoForLink = null;
     const linkType = getLinkType(link, e.target);
+    
+    if (IS_TWITTER) {
+      const article = link.closest && link.closest('article[role="article"]');
+      if (article) {
+        tweetInfoForLink = getTweetInfoFromArticle(article);
+        if (tweetInfoForLink) {
+          ensureTwitterInterceptor();
+          const canonicalUrl = tweetInfoForLink.url;
+          const linkUrlObj = (() => {
+            try {
+              return new URL(link.getAttribute('href') || '', window.location.origin);
+            } catch (error) {
+              return null;
+            }
+          })();
+          const isAuxiliaryMediaLink = linkUrlObj ? /\/status\/[^/]+\/(photo|video|media|audio)/i.test(linkUrlObj.pathname) : false;
+          if (isAuxiliaryMediaLink && (pendingTwitterThreadId === tweetInfoForLink.id || currentTwitterTweetId === tweetInfoForLink.id || currentlyProcessingUrl === canonicalUrl)) {
+            return;
+          }
+          link.__hoverTweetInfo = tweetInfoForLink;
+          link.__hoverArticle = article;
+          link.__hoverCanonicalUrl = canonicalUrl;
+          url = canonicalUrl;
+        } else {
+          delete link.__hoverTweetInfo;
+          delete link.__hoverArticle;
+          delete link.__hoverCanonicalUrl;
+        }
+      }
+    }
+    
+    if (IS_TWITTER) {
+      try {
+        const parsedUrl = new URL(url, window.location.origin);
+        if (isInternalTwitterLink(parsedUrl.href) && !/\/status\//.test(parsedUrl.pathname)) {
+          return;
+        }
+      } catch (error) {
+        // Ignore parsing issues and proceed
+      }
+    }
     const shortUrl = getShortUrl(url);
     
     // Check if this is a YouTube thumbnail first
@@ -491,9 +1256,42 @@
   // Handle mouseout
   function handleMouseOut(e) {
     const link = findLink(e.target);
-    if (!link) return;
+    if (!link) {
+      if (IS_TWITTER) {
+        const article = e.target.closest && e.target.closest('article[role="article"]');
+        if (article) {
+          const relatedArticle = e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest('article[role="article"]');
+          if (relatedArticle === article) {
+            return;
+          }
+          
+          const info = getTweetInfoFromArticle(article);
+          if (info && pendingTwitterThreadId === info.id) {
+            debugLog(`[Twitter] Mouseout while background pending for ${info.id}, keeping tooltip visible`);
+            return;
+          }
+          
+          if (twitterHoverTimeout) {
+            clearTimeout(twitterHoverTimeout);
+            twitterHoverTimeout = null;
+          }
+          
+          if (currentlyProcessingUrl && (!info || info.id !== pendingTwitterThreadId)) {
+            scheduleHide(400, currentlyProcessingUrl);
+          }
+          
+          if (!info || info.id !== pendingTwitterThreadId) {
+            currentTwitterArticle = null;
+            currentTwitterTweetId = null;
+          }
+          currentHoveredElement = null;
+        }
+      }
+      return;
+    }
     
-    const url = link.href;
+    const url = link.__hoverCanonicalUrl || link.href;
+    const tweetInfoMouseOut = link.__hoverTweetInfo || (IS_TWITTER ? getTweetInfoFromArticle(link.closest && link.closest('article[role="article"]')) : null);
     const shortUrl = getShortUrl(url);
     
     // Handle YouTube thumbnail mouseout
@@ -572,6 +1370,11 @@
       }
     }
     
+    if (IS_TWITTER && tweetInfoMouseOut && pendingTwitterThreadId === tweetInfoMouseOut.id) {
+      debugLog(`[Twitter] Mouseout ignored for pending thread ${tweetInfoMouseOut.id}`);
+      return;
+    }
+    
     // Don't schedule hide if we're actively processing/streaming this URL
     if (currentlyProcessingUrl === url) {
       debugLog(`👋 MOUSEOUT: "${shortUrl}" (streaming active, tooltip will stay visible)`);
@@ -612,9 +1415,31 @@
   
   // Process link hover
   async function processLinkHover(link) {
-    const url = link.href;
+    const url = link.__hoverCanonicalUrl || link.href;
     const shortUrl = getShortUrl(url);
     const isReddit = isRedditPostUrl(url);
+    const tweetInfo = link.__hoverTweetInfo || null;
+    const tweetArticle = link.__hoverArticle || (link.closest && link.closest('article[role="article"]'));
+    
+    if (IS_TWITTER && tweetInfo && tweetArticle) {
+      await processTwitterHover(tweetArticle, tweetInfo);
+      return;
+    }
+    
+    if (IS_TWITTER) {
+      try {
+        const parsed = new URL(url, window.location.origin);
+        if (isInternalTwitterLink(parsed.href) && !/\/status\//.test(parsed.pathname)) {
+          currentlyProcessingUrl = null;
+          processingElement = null;
+          return;
+        }
+      } catch (error) {
+        currentlyProcessingUrl = null;
+        processingElement = null;
+        return;
+      }
+    }
     
     // Clear previous processing URL when starting a new one
     if (currentlyProcessingUrl && currentlyProcessingUrl !== url) {
@@ -726,7 +1551,11 @@
   }
   
   function handleSummaryResult(result, link, url, shortUrl, isStillCurrent) {
-    if (!result || !result.status) {
+    if (!isStillCurrent && IS_TWITTER && pendingTwitterThreadId) {
+      pendingTwitterThreadId = null;
+      pendingTwitterStartedAt = 0;
+    }
+  if (!result || !result.status) {
       debugLog(`❌ INVALID RESULT: "${shortUrl}"`);
       if (displayMode === 'tooltip' || displayMode === 'both') {
         showTooltip(link, '<div style="padding:10px;background:#fee;border-radius:8px;">Error: No summary result returned.</div>', url);
@@ -734,6 +1563,7 @@
       if (isStillCurrent) {
         currentlyProcessingUrl = null;
         processingElement = null;
+        clearTwitterState();
       }
       return;
     }
@@ -743,6 +1573,7 @@
       if (isStillCurrent) {
         currentlyProcessingUrl = null;
         processingElement = null;
+        clearTwitterState();
       }
       return;
     }
@@ -761,6 +1592,7 @@
       if (isStillCurrent) {
         currentlyProcessingUrl = null;
         processingElement = null;
+        clearTwitterState();
       }
       return;
     }
@@ -785,6 +1617,7 @@
         
         currentlyProcessingUrl = null;
         processingElement = null;
+        clearTwitterState();
         debugLog(`✅ COMPLETE: "${shortUrl}" (ready for next hover)`);
       } else {
         debugLog(`⚠️ STALE CACHED: "${shortUrl}" (user moved on, ignoring)`);
@@ -802,6 +1635,26 @@
   
   // Listen for messages from background
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.type === 'CAPTURE_TWITTER_THREAD') {
+      if (!IS_TWITTER) {
+        sendResponse({ status: 'error', error: 'NOT_TWITTER_CONTEXT' });
+        return false;
+      }
+      (async () => {
+        try {
+          const payload = await captureThreadForBackground(message.tweetId);
+          if (payload && payload.nodes && payload.nodes.length) {
+            sendResponse({ status: 'ok', payload });
+          } else {
+            sendResponse({ status: 'error', error: 'NO_THREAD_DATA' });
+          }
+        } catch (error) {
+          sendResponse({ status: 'error', error: error ? error.message : 'CAPTURE_FAILED' });
+        }
+      })();
+      return true;
+    }
+    
     if (message.type === 'STREAMING_UPDATE') {
       // Only accept updates for the EXACT URL we're currently processing
       const isValid = (message.url === currentlyProcessingUrl) || 
@@ -847,6 +1700,9 @@
   });
   
   // Initialize hover detection
+  if (IS_TWITTER) {
+    ensureTwitterInterceptor();
+  }
   document.body.addEventListener('mouseover', handleMouseOver, true);
   document.body.addEventListener('mouseout', handleMouseOut, true);
   

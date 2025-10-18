@@ -5,7 +5,9 @@
   "description": "Preview article content by hovering over links",
   "permissions": [
     "sidePanel",
-    "storage"
+    "storage",
+    "tabs",
+    "scripting"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -36,7 +38,8 @@
     "resources": [
       "lib/Readability.js", 
       "youtube/youtube-inject-page.js",
-      "youtube/youtube-caption-handler.js"
+      "youtube/youtube-caption-handler.js",
+      "twitter/twitter-interceptor.js"
     ],
     "matches": ["<all_urls>"]
   }]

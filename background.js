@@ -152,7 +152,9 @@ const htmlCache = {};
 const summaryCache = new Map();
 const youtubeCaptionCache = new Map(); // Cache for YouTube caption data
 const youtubeSummaryCache = new Map(); // Cache for YouTube summaries
+const twitterThreadCache = new Map(); // Cache for Twitter conversation scrapes
 const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
+const TWITTER_THREAD_TTL = 5 * 60 * 1000; // 5 minutes
 
 let currentAbortController = null;
 let isProcessingSummary = false;
@@ -177,7 +179,12 @@ setInterval(() => {
       summaryCache.delete(key);
     }
   }
-  console.log(`[Background] Cache cleaned. ${summaryCache.size} entries remaining.`);
+  for (const [key, value] of twitterThreadCache.entries()) {
+    if (now - value.timestamp > TWITTER_THREAD_TTL) {
+      twitterThreadCache.delete(key);
+    }
+  }
+  console.log(`[Background] Cache cleaned. Summaries: ${summaryCache.size}, Twitter threads: ${twitterThreadCache.size}.`);
 }, 5 * 60 * 1000);
 
 // ========================================
@@ -611,6 +618,239 @@ function formatAISummary(text) {
     .replace(/(<\/ul>)<\/p>/g, '$1');
   
   return formatted;
+}
+
+// ========================================
+// TWITTER BACKGROUND SCRAPE HELPERS
+// ========================================
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForTabComplete(tabId, timeout = 15000) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab) throw new Error('TAB_NOT_FOUND');
+  if (tab.status === 'complete') {
+    return;
+  }
+  
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('TAB_LOAD_TIMEOUT'));
+    }, timeout);
+    
+    function handleUpdate(updatedTabId, changeInfo) {
+      if (updatedTabId === tabId && changeInfo.status === 'complete') {
+        cleanup();
+        resolve();
+      }
+    }
+    
+    function handleRemoved(removedTabId) {
+      if (removedTabId === tabId) {
+        cleanup();
+        reject(new Error('TAB_CLOSED'));
+      }
+    }
+    
+    function cleanup() {
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(handleUpdate);
+      chrome.tabs.onRemoved.removeListener(handleRemoved);
+    }
+    
+    chrome.tabs.onUpdated.addListener(handleUpdate);
+    chrome.tabs.onRemoved.addListener(handleRemoved);
+  });
+}
+
+async function captureTwitterThreadInTab(tabId, tweetId) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await chrome.tabs.sendMessage(tabId, {
+        type: 'CAPTURE_TWITTER_THREAD',
+        tweetId
+      });
+      
+      if (response && response.status === 'ok' && response.payload && Array.isArray(response.payload.nodes)) {
+        const payload = response.payload;
+        payload.source = payload.source || 'background';
+        return payload;
+      }
+      
+      if (response && response.error) {
+        console.warn('[Twitter] Capture response error:', response.error);
+      }
+    } catch (error) {
+      console.warn('[Twitter] Capture attempt failed:', error);
+    }
+    
+    await delay(300 * (attempt + 1));
+  }
+  
+  try {
+    const executed = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: async (targetTweetId) => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const start = Date.now();
+        let bestNodes = null;
+        while (Date.now() - start < 12000) {
+          const BUTTON_SELECTOR = 'div[role="button"], button, a[role="link"]';
+          const EXPAND_MATCH = /(show|view|reveal).*(repl|thread|tweet)/i;
+          document.querySelectorAll(BUTTON_SELECTOR).forEach((el) => {
+            const text = (el.textContent || '').trim();
+            if (text && EXPAND_MATCH.test(text)) {
+              el.click();
+            }
+          });
+          window.scrollBy(0, Math.max(window.innerHeight * 0.9, 600));
+          await sleep(420);
+          document.querySelectorAll(BUTTON_SELECTOR).forEach((el) => {
+            const text = (el.textContent || '').trim();
+            if (text && EXPAND_MATCH.test(text)) {
+              el.click();
+            }
+          });
+          await sleep(220);
+          const nodesMap = new Map();
+          document.querySelectorAll('article[role="article"]').forEach((article) => {
+            const link = article.querySelector('a[href*="/status/"]');
+            const href = link ? link.getAttribute('href') : null;
+            let id = null;
+            if (href) {
+              const match = href.match(/status\/(\d+)/);
+              if (match) id = match[1];
+            }
+            if (!id && targetTweetId) id = targetTweetId;
+            if (!id) return;
+            const handleSpan = article.querySelector('div[dir="ltr"] span');
+            const handle = handleSpan ? handleSpan.textContent : null;
+            const textEl = article.querySelector('[data-testid="tweetText"]');
+            const text = textEl ? textEl.innerText.trim() : '';
+            const timeEl = article.querySelector('time');
+            const timestamp = timeEl ? timeEl.getAttribute('datetime') : null;
+            const media = [];
+            article.querySelectorAll('img').forEach((img) => {
+              if (!img || !img.src) return;
+              const pixels = (img.naturalWidth || img.width || 0) * (img.naturalHeight || img.height || 0);
+              if (pixels > 40000) {
+                media.push({ kind: 'photo', urls: [img.src] });
+              }
+            });
+            const existing = nodesMap.get(id);
+            if (!existing || (text && text.length > (existing.text || '').length)) {
+              nodesMap.set(id, {
+                id: String(id),
+                conversationId: null,
+                authorName: null,
+                handle: handle || null,
+                avatarUrl: null,
+                timestamp,
+                permalink: link ? (link.href || null) : null,
+                text,
+                media,
+                inReplyToId: null,
+                order: 0
+              });
+            }
+          });
+          const nodes = Array.from(nodesMap.values());
+          nodes.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+          nodes.forEach((node, idx) => { node.order = idx; });
+          if (nodes.length > 1) {
+            return {
+              status: 'ok',
+              payload: {
+                rootId: nodes[0].id,
+                conversationId: null,
+                nodes,
+                source: 'background-script'
+              }
+            };
+          }
+          if (nodes.length && !bestNodes) {
+            bestNodes = nodes;
+          }
+          await sleep(400);
+        }
+        if (bestNodes && bestNodes.length) {
+          bestNodes.forEach((node, idx) => { node.order = idx; });
+          return {
+            status: 'ok',
+            payload: {
+              rootId: bestNodes[0].id,
+              conversationId: null,
+              nodes: bestNodes,
+              source: 'background-script'
+            }
+          };
+        }
+        return { status: 'error', error: 'NO_TWEETS_FOUND' };
+      },
+      args: [tweetId]
+    });
+    if (executed && executed.length && executed[0].result && executed[0].result.status === 'ok') {
+      return executed[0].result.payload;
+    }
+  } catch (error) {
+    console.warn('[Twitter] executeScript capture failed:', error);
+  }
+  
+  return null;
+}
+
+async function handleTwitterBackgroundScrape(message) {
+  const { url, tweetId, requestUrl } = message;
+  if (!url) {
+    return { status: 'error', error: 'MISSING_URL' };
+  }
+  
+  const cacheKey = tweetId || url;
+  const cached = twitterThreadCache.get(cacheKey);
+  if (cached && (Date.now() - cached.timestamp) < TWITTER_THREAD_TTL) {
+    return { status: 'ok', payload: cached.payload };
+  }
+  
+  let tab = null;
+  try {
+    const tabUrl = requestUrl || url;
+    tab = await chrome.tabs.create({ url: tabUrl, active: false });
+    if (!tab || typeof tab.id !== 'number') {
+      throw new Error('TAB_CREATION_FAILED');
+    }
+    
+    const tabId = tab.id;
+    
+    await waitForTabComplete(tabId, 18000);
+    await delay(800);
+    
+    const payload = await captureTwitterThreadInTab(tabId, tweetId);
+    
+    if (payload && payload.nodes && payload.nodes.length) {
+      console.log('[Twitter] Background capture nodes:', payload.nodes.length, 'source:', payload.source);
+      twitterThreadCache.set(cacheKey, {
+        payload,
+        timestamp: Date.now()
+      });
+      return { status: 'ok', payload };
+    }
+    
+    return { status: 'error', error: 'BACKGROUND_CAPTURE_FAILED' };
+  } catch (error) {
+    console.error('[Twitter] Background scrape failed:', error);
+    return { status: 'error', error: error && error.message ? error.message : 'BACKGROUND_SCRAPE_FAILED' };
+  } finally {
+    if (tab && typeof tab.id === 'number') {
+      try {
+        await chrome.tabs.remove(tab.id);
+      } catch (e) {
+        // ignore
+      }
+    }
+  }
 }
 
 // Handle content summarization
@@ -1172,6 +1412,16 @@ chrome.action.onClicked.addListener((tab) => {
 
 // Listen for messages
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'SCRAPE_TWITTER_THREAD') {
+    handleTwitterBackgroundScrape(message)
+      .then(result => sendResponse(result))
+      .catch(error => {
+        console.error('[Twitter] Background scrape handler error:', error);
+        sendResponse({ status: 'error', error: error && error.message ? error.message : 'BACKGROUND_SCRAPE_FAILED' });
+      });
+    return true;
+  }
+  
   
   // Handle content summarization request
   if (message.type === 'SUMMARIZE_CONTENT') {
