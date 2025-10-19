@@ -1909,17 +1909,6 @@
         currentlyProcessingUrl = null;
       }
     }, 30000);
-    try {
-      await waitForYouTubeCaptions(videoId);
-    } catch (error) {
-      console.warn('[YouTube] Captions not ready:', error.message);
-      if (displayMode === 'tooltip' || displayMode === 'both') {
-        showTooltip(tooltipAnchor, '<div style="padding:10px;background:#fee;border-radius:8px;">Captions not available yet. Hover again after the preview loads.</div>', url, tooltipOptions);
-      }
-      currentlyProcessingUrl = null;
-      clearTimeout(summaryTimeout);
-      return;
-    }
     if (displayMode === 'tooltip' || displayMode === 'both') {
       showTooltip(tooltipAnchor, '<div style="text-align:center;padding:16px;opacity:0.75;">Generating summary…</div>', url, tooltipOptions);
     }
