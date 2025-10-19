@@ -1909,6 +1909,12 @@
         currentlyProcessingUrl = null;
       }
     }, 30000);
+
+    await Promise.race([
+      waitForYouTubeCaptions(videoId).catch(() => {}),
+      new Promise(resolve => setTimeout(resolve, 300))
+    ]);
+
     if (displayMode === 'tooltip' || displayMode === 'both') {
       showTooltip(tooltipAnchor, '<div style="text-align:center;padding:16px;opacity:0.75;">Generating summary…</div>', url, tooltipOptions);
     }
