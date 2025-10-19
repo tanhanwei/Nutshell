@@ -49,6 +49,7 @@
   let pendingTwitterStartedAt = 0;
   let displayMode = 'both';
   let currentTooltipPlacement = 'auto';
+  let currentYouTubeRequestToken = 0;
   let currentHoveredElement = null;
   let isMouseInTooltip = false;
   let displayTimes = new Map(); // Track when each URL was displayed (url -> timestamp)
@@ -1202,6 +1203,16 @@
     // Check if this is a YouTube thumbnail first
     if (IS_YOUTUBE && isYouTubeThumbnail(e.target)) {
       console.log(`🎬 YOUTUBE THUMBNAIL: "${shortUrl}" (will trigger in ${HOVER_DELAY}ms)`);
+      try {
+        const parsedHost = new URL(url, window.location.origin).hostname.toLowerCase();
+        if (!YOUTUBE_HOSTS.has(parsedHost)) {
+          console.log(`[YouTube] Skipping non-YouTube thumbnail host: ${parsedHost}`);
+          return;
+        }
+      } catch (error) {
+        console.warn('[YouTube] Invalid thumbnail URL, skipping');
+        return;
+      }
       const videoId = extractYouTubeVideoId(url);
       const canonicalUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : url;
       const isSameVideo = currentlyProcessingUrl === canonicalUrl;
@@ -1225,6 +1236,8 @@
       link.__hoverAnchor = cardElement;
       thumbnailElement.__hoverAnchor = cardElement;
       link.__hoverCanonicalUrl = canonicalUrl;
+      const requestToken = ++currentYouTubeRequestToken;
+      link.__hoverRequestToken = requestToken;
 
       const isSwitch = currentlyProcessingUrl && currentlyProcessingUrl !== canonicalUrl;
       if (isSwitch) {
@@ -1265,7 +1278,7 @@
       // Schedule hover (DON'T set currentlyProcessingUrl yet - that happens when timeout fires!)
       const hoverTimeout = setTimeout(() => {
         hoverTimeouts.delete(canonicalUrl); // Clean up
-        handleYouTubeVideoHover(cardElement, link, canonicalUrl);
+        handleYouTubeVideoHover(cardElement, link, canonicalUrl, requestToken);
       }, HOVER_DELAY);
 
       // Store timeout for this URL
@@ -1276,12 +1289,22 @@
     }
     
     if (IS_YOUTUBE && isYouTubeVideoLink(url)) {
+      try {
+        const parsedHost = new URL(url, window.location.origin).hostname.toLowerCase();
+        if (!YOUTUBE_HOSTS.has(parsedHost)) {
+          return;
+        }
+      } catch (error) {
+        return;
+      }
       const videoId = extractYouTubeVideoId(url);
       if (!videoId) return;
       const canonicalUrl = `https://www.youtube.com/watch?v=${videoId}`;
       link.__hoverCanonicalUrl = canonicalUrl;
       const cardElement = findYouTubeCardElement(link) || link;
       link.__hoverAnchor = cardElement;
+      const requestToken = ++currentYouTubeRequestToken;
+      link.__hoverRequestToken = requestToken;
       const isSameVideo = currentlyProcessingUrl === canonicalUrl;
       if (isSameVideo) {
         console.log('[YouTube] ⏭️  Already processing/displaying this video link, ignoring re-hover');
@@ -1315,7 +1338,7 @@
       currentHoveredElement = link;
       const hoverTimeout = setTimeout(() => {
         hoverTimeouts.delete(canonicalUrl);
-        handleYouTubeVideoHover(cardElement, link, canonicalUrl);
+        handleYouTubeVideoHover(cardElement, link, canonicalUrl, requestToken);
       }, HOVER_DELAY);
       hoverTimeouts.set(canonicalUrl, hoverTimeout);
       currentHoverTimeout = hoverTimeout;
@@ -1378,6 +1401,7 @@
           }
           currentHoveredElement = null;
           delete link.__hoverAnchor;
+          delete link.__hoverRequestToken;
         }
       }
       return;
@@ -1430,6 +1454,8 @@
       debugLog(`[Twitter] Mouseout ignored for pending thread ${tweetInfoMouseOut.id}`);
       return;
     }
+    delete link.__hoverAnchor;
+    delete link.__hoverRequestToken;
     
     // Don't schedule hide if we're actively processing/streaming this URL
     if (currentlyProcessingUrl === url) {
@@ -1881,8 +1907,12 @@
     });
   }
 
-  async function handleYouTubeVideoHover(anchorElement, linkElement, url) {
+  async function handleYouTubeVideoHover(anchorElement, linkElement, url, requestToken) {
     console.log('[YouTube] Video hover detected:', url);
+    if (requestToken !== currentYouTubeRequestToken) {
+      console.log('[YouTube] Stale hover request, ignoring');
+      return;
+    }
     const videoId = extractYouTubeVideoId(url);
     if (!videoId) {
       console.warn('[YouTube] Could not extract video ID from:', url);
@@ -1907,6 +1937,10 @@
           showTooltip(tooltipAnchor, '<div style="padding:10px;background:#fee;border-radius:8px;">Summary timed out. Try hovering again.</div>', url, tooltipOptions);
         }
         currentlyProcessingUrl = null;
+        if (linkElement) {
+          delete linkElement.__hoverAnchor;
+          delete linkElement.__hoverRequestToken;
+        }
       }
     }, 30000);
 
@@ -1918,12 +1952,18 @@
     if (displayMode === 'tooltip' || displayMode === 'both') {
       showTooltip(tooltipAnchor, '<div style="text-align:center;padding:16px;opacity:0.75;">Generating summary…</div>', url, tooltipOptions);
     }
+    if (requestToken !== currentYouTubeRequestToken) {
+      return;
+    }
     chrome.runtime.sendMessage({
       action: 'GET_YOUTUBE_SUMMARY',
       videoId,
       url
     }, (response) => {
       clearTimeout(summaryTimeout);
+      if (requestToken !== currentYouTubeRequestToken) {
+        return;
+      }
       if (chrome.runtime.lastError) {
         console.error('[YouTube] Runtime error:', chrome.runtime.lastError);
         if (displayMode === 'tooltip' || displayMode === 'both') {
@@ -1951,6 +1991,7 @@
         processingElement = null;
         if (linkElement) {
           delete linkElement.__hoverAnchor;
+          delete linkElement.__hoverRequestToken;
         }
         return;
       }
@@ -1968,6 +2009,7 @@
         processingElement = null;
         if (linkElement) {
           delete linkElement.__hoverAnchor;
+          delete linkElement.__hoverRequestToken;
         }
       }
     });
