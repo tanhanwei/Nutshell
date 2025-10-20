@@ -36,6 +36,9 @@
   // State management
   let currentHoverTimeout = null;
   let hideTimeout = null;
+  let tooltipHideAnimationTimeout = null;
+  let shortcutSummaryContainer = null;
+  let shortcutSummaryUrl = null;
   let lastProcessedUrl = null;
   let currentlyProcessingUrl = null;
   let currentlyDisplayedUrl = null; // Track what URL the tooltip is currently showing
@@ -54,12 +57,33 @@
   let isMouseInTooltip = false;
   let displayTimes = new Map(); // Track when each URL was displayed (url -> timestamp)
   let hoverTimeouts = new Map(); // Track hover timeouts per URL (url -> {timeoutId, requestToken})
-  
+  const summaryStateByVideo = new Map(); // videoId -> {status, html, text, url, updatedAt}
+  let shortcutSummaryVideoId = null;
+
+  const isTooltipMode = () => displayMode === 'tooltip' || displayMode === 'both';
+  const isPanelMode = () => displayMode === 'panel' || displayMode === 'sidepanel' || displayMode === 'both';
+
   // Twitter-specific state
   const twitterGqlCache = new Map(); // tweetId -> array of captured JSON blobs
   let twitterInterceptorInstalled = false;
   
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const safeSendMessage = (payload) => {
+    return new Promise((resolve, reject) => {
+      try {
+        chrome.runtime.sendMessage(payload, (response) => {
+          const err = chrome.runtime.lastError;
+          if (err) {
+            reject(err);
+          } else {
+            resolve(response);
+          }
+        });
+      } catch (error) {
+        reject(error);
+      }
+    });
+  };
   
   // Create tooltip
   function createTooltip() {
@@ -191,12 +215,20 @@
       return;
     }
     hideTooltip();
+    clearShortcutSummary();
   };
   
   const handleTooltipKeyDown = (event) => {
-    if (event.key === 'Escape' && tooltip && tooltip.style.display === 'block') {
-      event.preventDefault();
-      cancelActiveSummary('escape_key');
+    if (event.key === 'Escape') {
+      if (tooltip && tooltip.style.display === 'block') {
+        event.preventDefault();
+        cancelActiveSummary('escape_key');
+        return;
+      }
+      if (shortcutSummaryContainer && shortcutSummaryContainer.style.display !== 'none') {
+        event.preventDefault();
+        cancelActiveSummary('escape_key');
+      }
     }
   };
   
@@ -253,6 +285,255 @@
           reason
         });
       }
+    }
+  }
+
+  function clearShortcutSummary() {
+    if (shortcutSummaryContainer) {
+      shortcutSummaryContainer.innerHTML = '';
+      shortcutSummaryContainer.style.display = 'none';
+      shortcutSummaryContainer.dataset.status = 'idle';
+      delete shortcutSummaryContainer.dataset.length;
+      shortcutSummaryUrl = null;
+    }
+    shortcutSummaryVideoId = null;
+  }
+
+  function storeSummaryState(videoId, state) {
+    if (!videoId) return;
+    const previous = summaryStateByVideo.get(videoId) || {};
+    summaryStateByVideo.set(videoId, {
+      ...previous,
+      ...state,
+      updatedAt: Date.now()
+    });
+  }
+  
+  function getCurrentWatchVideoId() {
+    if (!IS_YOUTUBE) return null;
+    if (!window.location.pathname.startsWith('/watch')) return null;
+    return extractYouTubeVideoId(window.location.href);
+  }
+  
+  function shouldShowInlineForVideo(videoId) {
+    if (!videoId) return false;
+    if (displayMode === 'panel' || displayMode === 'sidepanel') return false;
+    const currentVideoId = getCurrentWatchVideoId();
+    return !!currentVideoId && currentVideoId === videoId;
+  }
+
+  let pendingInlineHostCheck = null;
+
+  function locateInlineHost() {
+    const metadata = document.querySelector('ytd-watch-metadata');
+    if (!metadata) return null;
+    const titleEl = metadata.querySelector('#title') || metadata.querySelector('h1.title');
+    if (titleEl && titleEl.parentElement) {
+      return titleEl.parentElement;
+    }
+    return null;
+  }
+
+  function scheduleInlineHostCheck() {
+    if (pendingInlineHostCheck) return;
+    pendingInlineHostCheck = requestAnimationFrame(() => {
+      pendingInlineHostCheck = null;
+      maybeRelocateInlineSummary();
+    });
+  }
+
+  function maybeRelocateInlineSummary() {
+    if (!shortcutSummaryContainer) return;
+    const host = locateInlineHost();
+    if (!host || !host.parentElement) {
+      scheduleInlineHostCheck();
+      return;
+    }
+    if (host.parentElement === shortcutSummaryContainer.parentElement && shortcutSummaryContainer.previousSibling === host) {
+      return;
+    }
+    host.parentElement.insertBefore(shortcutSummaryContainer, host.nextSibling);
+  }
+
+  function ensureShortcutSummaryContainer() {
+    if (!shortcutSummaryContainer || !document.body.contains(shortcutSummaryContainer)) {
+      const container = document.createElement('div');
+      container.id = 'hover-preview-inline-summary';
+      container.style.cssText = [
+        'margin-top: 12px',
+        'padding: 16px',
+        'border-radius: 12px',
+        'background: rgba(248,249,251,0.9)',
+        'backdrop-filter: blur(6px)',
+        'border: 1px solid rgba(0,0,0,0.08)',
+        'box-shadow: 0 10px 30px rgba(15,23,42,0.07)',
+        'font-size: 14px',
+        'line-height: 1.6',
+        'color: #1f2937',
+        'display: none',
+        'max-width: 840px'
+      ].join(';');
+      container.dataset.status = 'idle';
+      shortcutSummaryContainer = container;
+      document.body.appendChild(container);
+    }
+    maybeRelocateInlineSummary();
+    scheduleInlineHostCheck();
+    return shortcutSummaryContainer;
+  }
+
+  function renderInlineSummary(videoId, state = {}) {
+    if (!state.force && !shouldShowInlineForVideo(videoId)) {
+      return;
+    }
+    const container = ensureShortcutSummaryContainer();
+    const html = state.html || '<div style="padding:12px 16px;font-style:italic;opacity:0.75;">Generating summary…</div>';
+    container.innerHTML = html;
+    container.style.display = 'block';
+    container.dataset.status = state.status || 'loading';
+    if (state.length !== undefined) {
+      container.dataset.length = String(state.length);
+    } else {
+      delete container.dataset.length;
+    }
+    shortcutSummaryVideoId = videoId;
+    shortcutSummaryUrl = state.url || shortcutSummaryUrl || `https://www.youtube.com/watch?v=${videoId}`;
+  }
+
+  function maybeAutoloadInlineSummary(forcePlaceholder = false) {
+    if (!IS_YOUTUBE) return;
+    if (displayMode === 'panel' || displayMode === 'sidepanel') {
+      clearShortcutSummary();
+      return;
+    }
+    const videoId = getCurrentWatchVideoId();
+    if (!videoId) {
+      clearShortcutSummary();
+      return;
+    }
+    const state = summaryStateByVideo.get(videoId);
+    if (state) {
+      if (tooltip && tooltip.style.display === 'block') {
+        hideTooltip();
+      }
+      renderInlineSummary(videoId, state);
+    } else if (forcePlaceholder) {
+      renderInlineSummary(videoId, {
+        status: 'loading',
+        html: '<div style="padding:12px 16px;font-style:italic;opacity:0.75;">Preparing summary…</div>',
+        url: window.location.href,
+        force: true
+      });
+      requestCachedSummary(videoId);
+    } else {
+      clearShortcutSummary();
+      requestCachedSummary(videoId);
+    }
+  }
+
+  function requestCachedSummary(videoId) {
+    if (!videoId) return;
+    safeSendMessage({
+      action: 'GET_YOUTUBE_SUMMARY_CACHE',
+      videoId
+    }).then((response) => {
+      if (!response || response.status !== 'complete' || !response.summary) {
+        return;
+      }
+      const formatted = formatAISummary(response.summary);
+      storeSummaryState(videoId, {
+        status: 'complete',
+        html: formatted,
+        text: response.summary,
+        url: response.url || `https://www.youtube.com/watch?v=${videoId}`,
+        length: response.summary.length
+      });
+      if (shouldShowInlineForVideo(videoId)) {
+        renderInlineSummary(videoId, {
+          status: 'complete',
+          html: formatted,
+          text: response.summary,
+          url: response.url || `https://www.youtube.com/watch?v=${videoId}`,
+          length: response.summary.length,
+          force: true
+        });
+      }
+    }).catch((error) => {
+      console.warn('[YouTube] Failed to fetch cached summary:', error);
+    });
+  }
+
+  function getYouTubePlayerAnchor() {
+    const selectors = [
+      '#movie_player',
+      '#player-container',
+      '#primary #player',
+      'ytd-player',
+      '.html5-video-player'
+    ];
+    for (const selector of selectors) {
+      const el = document.querySelector(selector);
+      if (el) {
+        return el;
+      }
+    }
+    const videoEl = document.querySelector('video');
+    if (videoEl && videoEl.parentElement) {
+      return videoEl.parentElement;
+    }
+    return null;
+  }
+
+  function handleGlobalKeyDown(event) {
+    if (!IS_YOUTUBE) return;
+    if (!event.shiftKey || event.key.toLowerCase() !== 's') return;
+    if (event.repeat) return;
+    if (!window.location.pathname.startsWith('/watch')) return;
+
+    const activeElement = document.activeElement;
+    if (activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA' || activeElement.isContentEditable)) {
+      return;
+    }
+
+    const videoId = extractYouTubeVideoId(window.location.href);
+    if (!videoId) {
+      return;
+    }
+
+    event.preventDefault();
+
+    cancelActiveSummary('shortcut_restart');
+
+    const canonicalUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const anchorElement = getYouTubePlayerAnchor();
+    const requestToken = ++currentYouTubeRequestToken;
+    const hoverAnchor = anchorElement || document.body;
+    const forceInline = displayMode === 'tooltip' || displayMode === 'both';
+    const shortcutTimeout = setTimeout(() => {
+      hoverTimeouts.delete(canonicalUrl);
+      handleYouTubeVideoHover(hoverAnchor, null, canonicalUrl, requestToken, { forceInline });
+    }, 0);
+    hoverTimeouts.set(canonicalUrl, { timeoutId: shortcutTimeout, requestToken });
+    currentHoverTimeout = shortcutTimeout;
+    currentlyProcessingUrl = canonicalUrl;
+    currentHoveredElement = hoverAnchor;
+    processingElement = hoverAnchor;
+    if (forceInline) {
+      const summaryContainer = ensureShortcutSummaryContainer();
+      shortcutSummaryUrl = canonicalUrl;
+      shortcutSummaryVideoId = videoId;
+      summaryContainer.innerHTML = '<div style="padding:12px 16px;font-style:italic;opacity:0.75;">Capturing captions…</div>';
+      summaryContainer.style.display = 'block';
+      summaryContainer.dataset.status = 'loading';
+      storeSummaryState(videoId, {
+        status: 'loading',
+        html: summaryContainer.innerHTML,
+        url: canonicalUrl
+      });
+    } else {
+      shortcutSummaryUrl = null;
+      shortcutSummaryVideoId = null;
+      clearShortcutSummary();
     }
   }
   
@@ -960,6 +1241,8 @@
     hideTimeout = null;
     
     const tooltipEl = createTooltip();
+    clearTimeout(tooltipHideAnimationTimeout);
+    tooltipHideAnimationTimeout = null;
     tooltipEl.innerHTML = content;
     tooltipEl.style.display = 'block';
     attachTooltipDismissHandlers();
@@ -986,7 +1269,8 @@
       
       tooltip.style.opacity = '0';
       currentlyDisplayedUrl = null; // Clear displayed URL when hiding
-      setTimeout(() => {
+      clearTimeout(tooltipHideAnimationTimeout);
+      tooltipHideAnimationTimeout = setTimeout(() => {
         if (tooltip && !isMouseInTooltip) {
           tooltip.style.display = 'none';
           debugLog(`🔒 TOOLTIP CLOSED: display set to none`);
@@ -1003,7 +1287,17 @@
   
   // Update tooltip content
   function updateTooltipContent(content, url) {
-    if (displayMode === 'panel') return;
+    let handledInline = false;
+    if (shortcutSummaryUrl && shortcutSummaryUrl === url) {
+      const summaryContainer = ensureShortcutSummaryContainer();
+      summaryContainer.innerHTML = content;
+      summaryContainer.style.display = 'block';
+      summaryContainer.dataset.status = 'streaming';
+      handledInline = true;
+    }
+    if (handledInline || displayMode === 'panel') {
+      return;
+    }
     
     const shortUrl = url ? getShortUrl(url) : 'unknown';
     const wasShowing = currentlyDisplayedUrl ? getShortUrl(currentlyDisplayedUrl) : 'none';
@@ -1691,6 +1985,7 @@
   }
   
   function handleSummaryResult(result, link, url, shortUrl, isStillCurrent) {
+    const videoIdContext = IS_YOUTUBE ? extractYouTubeVideoId(url) : null;
     if (!isStillCurrent && IS_TWITTER && pendingTwitterThreadId) {
       pendingTwitterThreadId = null;
       pendingTwitterStartedAt = 0;
@@ -1726,8 +2021,16 @@
     if (result.status === 'error') {
       const errorMessage = result.error || result.message || 'Unknown error';
       console.error(`❌ ERROR: "${shortUrl}" - ${errorMessage}`);
+      const errorHtml = `<div style="padding:10px;background:#fee;border-radius:8px;">Error: ${errorMessage}</div>`;
+      if (videoIdContext) {
+        storeSummaryState(videoIdContext, {
+          status: 'error',
+          html: errorHtml,
+          url
+        });
+      }
       if (displayMode === 'tooltip' || (displayMode === 'both' && isStillCurrent)) {
-        showTooltip(link, `<div style="padding:10px;background:#fee;border-radius:8px;">Error: ${errorMessage}</div>`, url);
+        showTooltip(link, errorHtml, url);
       }
       if (isStillCurrent) {
         currentlyProcessingUrl = null;
@@ -1740,13 +2043,23 @@
     if (result.status === 'complete' && result.cached) {
       debugLog(`💾 CACHED: "${shortUrl}" (instant display, still current: ${isStillCurrent})`);
       
+      if (videoIdContext && result.summary) {
+        const formattedCached = formatAISummary(result.summary);
+        storeSummaryState(videoIdContext, {
+          status: 'complete',
+          html: formattedCached,
+          text: result.summary,
+          url,
+          length: result.summary.length || 0
+        });
+      }
       if (isStillCurrent) {
         const formattedSummary = formatAISummary(result.summary);
-        
+
         if (displayMode === 'tooltip' || displayMode === 'both') {
           showTooltip(link, formattedSummary, url);
         }
-        
+
         if (displayMode === 'panel' || displayMode === 'both') {
           chrome.runtime.sendMessage({
             type: 'DISPLAY_CACHED_SUMMARY',
@@ -1764,7 +2077,7 @@
       }
       return;
     }
-    
+
     if (isStillCurrent) {
       debugLog(`📡 STREAMING: "${shortUrl}" (will receive updates)`);
     } else {
@@ -1796,16 +2109,39 @@
     }
     
     if (message.type === 'STREAMING_UPDATE') {
-      // Only accept updates for the EXACT URL we're currently processing
-      const isValid = message.url === currentlyProcessingUrl;
-      if (!isValid) {
+      const messageVideoId = message.videoId || extractYouTubeVideoId(message.url || '');
+      if (messageVideoId) {
+        storeSummaryState(messageVideoId, {
+          status: 'streaming',
+          html: message.content,
+          url: message.url
+        });
+      }
+      const watchMatch = messageVideoId && shouldShowInlineForVideo(messageVideoId) && isTooltipMode();
+      const inlineMatch = messageVideoId && shortcutSummaryVideoId === messageVideoId;
+      const urlMatch = message.url === currentlyProcessingUrl;
+      if (watchMatch) {
+        renderInlineSummary(messageVideoId, {
+          status: 'streaming',
+          html: message.content,
+          url: message.url
+        });
+        if (tooltip && tooltip.style.display === 'block') {
+          hideTooltip();
+        }
+        currentlyProcessingUrl = message.url;
+      }
+      if (!urlMatch && !inlineMatch && !watchMatch) {
         if (IS_YOUTUBE) {
-          console.debug(`[YouTube] REJECTED stale update for: ${message.url}`);
-          console.debug(`  Currently processing: ${currentlyProcessingUrl}`);
+          console.log(`[YouTube] REJECTED stale update for: ${message.url}`);
+          console.log(`  Currently processing: ${currentlyProcessingUrl}`);
         }
         return;
       }
-      updateTooltipContent(message.content, message.url);
+      if (!watchMatch && !inlineMatch && isTooltipMode()) {
+        updateTooltipContent(message.content, message.url);
+      }
+      return;
     }
     
     if (message.type === 'PROCESSING_STATUS') {
@@ -1819,9 +2155,10 @@
     if (message.type === 'DISPLAY_MODE_CHANGED') {
       displayMode = message.displayMode;
       debugLog('[Content] Display mode updated:', displayMode);
-      if (displayMode === 'panel') {
+      if (!isTooltipMode()) {
         hideTooltip();
       }
+      maybeAutoloadInlineSummary();
     }
   });
   
@@ -1831,7 +2168,12 @@
       displayMode = result.displayMode;
       debugLog('[Content] Initial display mode:', displayMode);
     }
+    maybeAutoloadInlineSummary();
   });
+
+  if (IS_YOUTUBE) {
+    maybeAutoloadInlineSummary();
+  }
   
   // Initialize hover detection
   if (IS_TWITTER) {
@@ -1839,7 +2181,19 @@
   }
   document.body.addEventListener('mouseover', handleMouseOver, true);
   document.body.addEventListener('mouseout', handleMouseOut, true);
-  
+  document.addEventListener('keydown', handleGlobalKeyDown, true);
+  if (IS_YOUTUBE) {
+    window.addEventListener('yt-navigate-finish', () => {
+      hideTooltip();
+      clearShortcutSummary();
+      maybeAutoloadInlineSummary(true);
+    });
+    window.addEventListener('yt-navigate-start', () => {
+      hideTooltip();
+      clearShortcutSummary();
+    });
+  }
+
   debugLog('[Content] Hover link extension initialized');
   
   // Format AI summary (same as background.js)
@@ -1965,7 +2319,7 @@
     });
   }
 
-  async function handleYouTubeVideoHover(anchorElement, linkElement, url, requestToken) {
+  async function handleYouTubeVideoHover(anchorElement, linkElement, url, requestToken, options = {}) {
     console.log('[YouTube] Hover handler start', {
       url,
       requestToken,
@@ -1986,11 +2340,22 @@
       return;
     }
     const tooltipAnchor = anchorElement || linkElement;
+    let tooltipPlacement = 'right';
+    if (anchorElement) {
+      const anchorTag = anchorElement.tagName ? anchorElement.tagName.toLowerCase() : '';
+      const isPlayerLike = anchorElement.id === 'movie_player' ||
+        anchorTag === 'ytd-player' ||
+        anchorElement.classList?.contains('html5-video-player') ||
+        (!!anchorElement.closest && !!anchorElement.closest('#player-container'));
+      if (isPlayerLike) {
+        tooltipPlacement = 'bottom';
+      }
+    }
     currentlyProcessingUrl = url;
     processingElement = linkElement || tooltipAnchor;
     currentHoveredElement = tooltipAnchor;
-    const tooltipOptions = { placement: 'right' };
-    if (displayMode === 'tooltip' || displayMode === 'both') {
+    const tooltipOptions = { placement: tooltipPlacement };
+    if (!options.forceInline && (displayMode === 'tooltip' || displayMode === 'both')) {
       showTooltip(tooltipAnchor, '<div style="text-align:center;padding:16px;opacity:0.75;">Capturing captions…</div>', url, tooltipOptions);
     }
     const summaryTimeout = setTimeout(() => {
@@ -2017,7 +2382,13 @@
       console.warn('[YouTube] Captions did not arrive in time, continuing anyway:', videoId, error && error.message ? error.message : error);
     }
 
-    if (displayMode === 'tooltip' || displayMode === 'both') {
+    if (options.forceInline) {
+      const summaryContainer = ensureShortcutSummaryContainer();
+      if (shortcutSummaryUrl === url) {
+        summaryContainer.innerHTML = '<div style="padding:12px 16px;font-style:italic;opacity:0.75;">Generating summary…</div>';
+        summaryContainer.dataset.status = 'loading';
+      }
+    } else if (displayMode === 'tooltip' || displayMode === 'both') {
       showTooltip(tooltipAnchor, '<div style="text-align:center;padding:16px;opacity:0.75;">Generating summary…</div>', url, tooltipOptions);
     }
     if (requestToken !== currentYouTubeRequestToken) {
@@ -2028,25 +2399,18 @@
       return;
     }
     console.log('[YouTube] Sending GET_YOUTUBE_SUMMARY', { videoId, url, requestToken });
-    chrome.runtime.sendMessage({
+    const messagePayload = {
       action: 'GET_YOUTUBE_SUMMARY',
       videoId,
       url
-    }, (response) => {
+    };
+    safeSendMessage(messagePayload).then((response) => {
       clearTimeout(summaryTimeout);
       if (requestToken !== currentYouTubeRequestToken) {
         console.warn('[YouTube] Request token changed before response handling', {
           requestToken,
           currentToken: currentYouTubeRequestToken
         });
-        return;
-      }
-      if (chrome.runtime.lastError) {
-        console.error('[YouTube] Runtime error:', chrome.runtime.lastError);
-        if (displayMode === 'tooltip' || displayMode === 'both') {
-          showTooltip(tooltipAnchor, '<div style="padding:10px;background:#fee;border-radius:8px;">Error generating summary.</div>', url, tooltipOptions);
-        }
-        currentlyProcessingUrl = null;
         return;
       }
       if (!response) {
@@ -2058,8 +2422,26 @@
       if (response.status === 'complete') {
         const summary = response.summary || 'No summary generated';
         const formatted = formatAISummary(summary);
-        showTooltip(tooltipAnchor, formatted, url, tooltipOptions);
-        if (displayMode === 'sidepanel' || displayMode === 'both') {
+        storeSummaryState(videoId, {
+          status: 'complete',
+          html: formatted,
+          text: summary,
+          url,
+          length: summary.length || 0
+        });
+        if (options.forceInline || shouldShowInlineForVideo(videoId)) {
+          renderInlineSummary(videoId, {
+            status: 'complete',
+            html: formatted,
+            text: summary,
+            url,
+            length: summary.length || 0
+          });
+        }
+        if (!(options.forceInline || shouldShowInlineForVideo(videoId)) && isTooltipMode()) {
+          showTooltip(tooltipAnchor, formatted, url, tooltipOptions);
+        }
+        if (isPanelMode()) {
           chrome.runtime.sendMessage({
             action: 'DISPLAY_CACHED_SUMMARY',
             summary,
@@ -2081,7 +2463,19 @@
         const errorMsg = response.error === 'NO_CAPTIONS'
           ? 'No captions available for this video yet.'
           : `Error: ${response.error}`;
-        if (displayMode === 'tooltip' || displayMode === 'both') {
+        const errorHtml = `<div style="padding:12px 16px;background:#fee;border-radius:8px;">${errorMsg}</div>`;
+        storeSummaryState(videoId, {
+          status: 'error',
+          html: errorHtml,
+          url
+        });
+        if (options.forceInline || shouldShowInlineForVideo(videoId)) {
+          renderInlineSummary(videoId, {
+            status: 'error',
+            html: errorHtml,
+            url
+          });
+        } else if (isTooltipMode()) {
           showTooltip(tooltipAnchor, `<div style="padding:10px;background:#fee;border-radius:8px;">${errorMsg}</div>`, url, tooltipOptions);
         }
         currentlyProcessingUrl = null;
@@ -2091,6 +2485,25 @@
           delete linkElement.__hoverRequestToken;
         }
       }
+    }).catch((error) => {
+      clearTimeout(summaryTimeout);
+      console.warn('[YouTube] sendMessage failed:', error);
+      const errorHtml = '<div style="padding:12px 16px;background:#fee;border-radius:8px;">Error generating summary.</div>';
+      storeSummaryState(videoId, {
+        status: 'error',
+        html: errorHtml,
+        url
+      });
+      if (options.forceInline || shouldShowInlineForVideo(videoId)) {
+        renderInlineSummary(videoId, {
+          status: 'error',
+          html: errorHtml,
+          url
+        });
+      } else if (isTooltipMode()) {
+        showTooltip(tooltipAnchor, errorHtml, url, tooltipOptions);
+      }
+      currentlyProcessingUrl = null;
     });
   }
   

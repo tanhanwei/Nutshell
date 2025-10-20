@@ -543,12 +543,23 @@ async function usePromptAPI(text, signal, url) {
 // Broadcast streaming updates to all display surfaces
 function broadcastStreamingUpdate(partialSummary, url) {
   const formatted = formatAISummary(partialSummary);
+  const videoId = (() => {
+    try {
+      if (!url) return null;
+      const parsed = new URL(url);
+      if (parsed.hostname.includes('youtube.com') && parsed.searchParams.has('v')) {
+        return parsed.searchParams.get('v');
+      }
+    } catch (error) {}
+    return null;
+  })();
   
   // Send to side panel if open
   chrome.runtime.sendMessage({
     type: 'STREAMING_UPDATE',
     content: formatted,
-    url: url
+    url: url,
+    videoId: videoId
   }).catch(() => {
     // Side panel not open, ignore
   });
@@ -559,7 +570,8 @@ function broadcastStreamingUpdate(partialSummary, url) {
       chrome.tabs.sendMessage(tabs[0].id, {
         type: 'STREAMING_UPDATE',
         content: formatted,
-        url: url
+        url: url,
+        videoId: videoId
       }).catch(() => {
         // Content script not ready, ignore
       });
@@ -1620,7 +1632,8 @@ async function handleYouTubeSummary(videoId, url, tabId) {
     // Cache the summary
     youtubeSummaryCache.set(videoId, {
       summary: summary,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      url
     });
     
     console.log('[YouTube] Summary generated successfully. Length:', summary ? summary.length : 0);
@@ -1848,5 +1861,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     
     return true; // Keep channel open for async response
+  }
+
+  if (message.action === 'GET_YOUTUBE_SUMMARY_CACHE') {
+    const videoId = message.videoId;
+    if (!videoId) {
+      sendResponse({ status: 'error', error: 'NO_VIDEO_ID' });
+      return false;
+    }
+    const cached = youtubeSummaryCache.get(videoId);
+    if (cached && cached.summary) {
+      sendResponse({
+        status: 'complete',
+        summary: cached.summary,
+        url: cached.url || null,
+        timestamp: cached.timestamp || null
+      });
+    } else {
+      sendResponse({ status: 'miss' });
+    }
+    return false;
   }
 });
