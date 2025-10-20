@@ -1244,7 +1244,7 @@ function captionsToText(captions) {
 /**
  * Handle YouTube caption summarization
  */
-async function handleYouTubeSummary(videoId, url) {
+async function handleYouTubeSummary(videoId, url, tabId) {
   console.log('[YouTube] Handling summary request for:', videoId);
   
   // CRITICAL: Abort any previous processing FIRST
@@ -1299,34 +1299,70 @@ async function handleYouTubeSummary(videoId, url) {
   if (!captionData) {
     console.log('[YouTube] Captions not in cache, requesting from bridge...');
     
-    // Request captions from the YouTube bridge
-    // The bridge will check with the page-injected handler
-    try {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    let targetTabId = tabId;
+    if (!targetTabId) {
+      const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
       if (!tabs[0]) {
         throw new Error('No active tab found');
       }
-      
-      const response = await chrome.tabs.sendMessage(tabs[0].id, {
-        action: 'GET_YOUTUBE_CAPTIONS',
-        videoId: videoId
-      });
-      
-      if (!response || !response.success) {
-        throw new Error(response?.error || 'Failed to get captions');
+      targetTabId = tabs[0].id;
+    }
+    
+    // Poll the bridge a few times in case captions are still loading
+    const MAX_ATTEMPTS = 6;
+    const RETRY_DELAY_MS = 500;
+    
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS && !captionData; attempt++) {
+      if (currentYouTubeAbortController?.signal?.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
       }
       
-      captionData = response.data;
+      try {
+        const response = await chrome.tabs.sendMessage(targetTabId, {
+          action: 'GET_YOUTUBE_CAPTIONS',
+          videoId: videoId
+        });
+        
+        if (response && response.success && response.data) {
+          captionData = response.data;
+          youtubeCaptionCache.set(videoId, {
+            data: captionData,
+            timestamp: captionData.timestamp || Date.now()
+          });
+          console.debug('[YouTube] Captions received on attempt', attempt);
+          break;
+        }
+        
+        const error = response?.error || 'UNKNOWN_ERROR';
+        console.debug('[YouTube] Caption attempt', attempt, 'failed:', error);
+        
+        if (error !== 'NO_CAPTIONS' && error !== 'TIMEOUT') {
+          throw new Error(error);
+        }
+      } catch (error) {
+        if (error && error.message === 'NO_CAPTIONS') {
+          console.debug('[YouTube] Caption attempt', attempt, 'reported no captions yet.');
+        } else if (error && error.message === 'No tab with id') {
+          throw new Error('YouTube tab no longer available');
+        } else {
+          console.error('[YouTube] Error getting captions:', error);
+          if (attempt === MAX_ATTEMPTS) {
+            return {
+              status: 'error',
+              error: 'NO_CAPTIONS',
+              message: 'Could not retrieve captions for this video'
+            };
+          }
+        }
+      }
       
-      // The data from the handler is an object: {videoId, captions, text, timestamp}
-      // Cache the caption data
-      youtubeCaptionCache.set(videoId, {
-        data: captionData,
-        timestamp: captionData.timestamp || Date.now()
-      });
-      
-    } catch (error) {
-      console.error('[YouTube] Error getting captions:', error);
+      if (!captionData && attempt < MAX_ATTEMPTS) {
+        await delay(RETRY_DELAY_MS);
+      }
+    }
+    
+    if (!captionData) {
+      console.warn('[YouTube] Failed to retrieve captions after retries');
       return {
         status: 'error',
         error: 'NO_CAPTIONS',
@@ -1353,6 +1389,7 @@ async function handleYouTubeSummary(videoId, url) {
   
   console.log('[YouTube] Caption count:', captionArray.length);
   console.log('[YouTube] Caption text length:', captionText.length);
+  console.debug('[YouTube] Caption text preview:', captionText.slice(0, 120));
   
   // Generate summary using the same logic as webpage summarization
   try {
@@ -1365,7 +1402,7 @@ async function handleYouTubeSummary(videoId, url) {
       timestamp: Date.now()
     });
     
-    console.log('[YouTube] Summary generated successfully');
+    console.log('[YouTube] Summary generated successfully. Length:', summary ? summary.length : 0);
     
     // Clear abort controller after success
     currentYouTubeAbortController = null;
@@ -1568,10 +1605,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'GET_YOUTUBE_SUMMARY') {
     const videoId = message.videoId;
     const url = message.url;
+    const tabId = sender?.tab?.id || message.tabId || null;
     
     console.log('[Background] YouTube summary requested for:', videoId);
     
-    handleYouTubeSummary(videoId, url)
+    handleYouTubeSummary(videoId, url, tabId)
       .then(result => {
         console.log('[Background] YouTube summary result:', result.status);
         sendResponse(result);

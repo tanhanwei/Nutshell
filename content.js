@@ -53,7 +53,7 @@
   let currentHoveredElement = null;
   let isMouseInTooltip = false;
   let displayTimes = new Map(); // Track when each URL was displayed (url -> timestamp)
-  let hoverTimeouts = new Map(); // Track hover timeouts per URL (url -> timeout ID)
+  let hoverTimeouts = new Map(); // Track hover timeouts per URL (url -> {timeoutId, requestToken})
   
   // Twitter-specific state
   const twitterGqlCache = new Map(); // tweetId -> array of captured JSON blobs
@@ -1215,9 +1215,14 @@
       }
       const videoId = extractYouTubeVideoId(url);
       const canonicalUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : url;
-      const isSameVideo = currentlyProcessingUrl === canonicalUrl;
-      if (isSameVideo) {
-        console.log('[YouTube] ⏭️  Already processing/displaying this video, ignoring re-hover');
+      const hasPending = hoverTimeouts.has(canonicalUrl);
+      const isProcessing = currentlyProcessingUrl === canonicalUrl;
+      if (hasPending || isProcessing) {
+        console.debug('[YouTube] ⏭️  Already processing/displaying this video, ignoring re-hover', {
+          hasPending,
+          isProcessing,
+          url: canonicalUrl
+        });
         return;
       }
 
@@ -1236,35 +1241,27 @@
       link.__hoverAnchor = cardElement;
       thumbnailElement.__hoverAnchor = cardElement;
       link.__hoverCanonicalUrl = canonicalUrl;
-      const requestToken = ++currentYouTubeRequestToken;
-      link.__hoverRequestToken = requestToken;
-
       const isSwitch = currentlyProcessingUrl && currentlyProcessingUrl !== canonicalUrl;
       if (isSwitch) {
-        console.log(`[YouTube] 🔴 SWITCHING FROM ${currentlyProcessingUrl} TO ${canonicalUrl}`);
+        console.debug(`[YouTube] 🔴 SWITCHING FROM ${currentlyProcessingUrl} TO ${canonicalUrl}`);
         const oldVideoId = extractYouTubeVideoId(currentlyProcessingUrl);
         chrome.runtime.sendMessage({
           action: 'ABORT_YOUTUBE_SUMMARY',
           videoId: oldVideoId,
           newVideoId: videoId
         }, response => {
-          console.log(`[YouTube] Abort response:`, response);
+          console.debug('[YouTube] Abort response:', response);
         });
       }
       
-      currentlyProcessingUrl = canonicalUrl;
-      link.__hoverCanonicalUrl = canonicalUrl;
+      const requestToken = ++currentYouTubeRequestToken;
+      link.__hoverRequestToken = requestToken;
       
-      // 2. Clear old hover timeout
-      if (currentHoverTimeout) {
-        clearTimeout(currentHoverTimeout);
-        currentHoverTimeout = null;
-      }
-      
-      // 3. Clear this URL's previous timeout if any
+      // Clear this URL's previous timeout if any
       const oldTimeout = hoverTimeouts.get(canonicalUrl);
       if (oldTimeout) {
-        clearTimeout(oldTimeout);
+        clearTimeout(oldTimeout.timeoutId);
+        hoverTimeouts.delete(canonicalUrl);
       }
       
       // 4. Clear hide timeout
@@ -1277,14 +1274,21 @@
       
       // Schedule hover (DON'T set currentlyProcessingUrl yet - that happens when timeout fires!)
       const hoverTimeout = setTimeout(() => {
+        console.log('[YouTube] Hover timeout firing for thumbnail', canonicalUrl, {
+          requestToken,
+          currentToken: currentYouTubeRequestToken,
+          pendingUrl: currentlyProcessingUrl
+        });
         hoverTimeouts.delete(canonicalUrl); // Clean up
         handleYouTubeVideoHover(cardElement, link, canonicalUrl, requestToken);
       }, HOVER_DELAY);
 
       // Store timeout for this URL
-      hoverTimeouts.set(canonicalUrl, hoverTimeout);
-      currentHoverTimeout = hoverTimeout; // Keep for compatibility
-      
+      hoverTimeouts.set(canonicalUrl, { timeoutId: hoverTimeout, requestToken });
+      console.log('[YouTube] Hover timeout scheduled for thumbnail', {
+        url: canonicalUrl,
+        requestToken
+      });
       return; // Don't process as regular link
     }
     
@@ -1303,33 +1307,34 @@
       link.__hoverCanonicalUrl = canonicalUrl;
       const cardElement = findYouTubeCardElement(link) || link;
       link.__hoverAnchor = cardElement;
-      const requestToken = ++currentYouTubeRequestToken;
-      link.__hoverRequestToken = requestToken;
-      const isSameVideo = currentlyProcessingUrl === canonicalUrl;
-      if (isSameVideo) {
-        console.log('[YouTube] ⏭️  Already processing/displaying this video link, ignoring re-hover');
+      const hasPending = hoverTimeouts.has(canonicalUrl);
+      const isProcessing = currentlyProcessingUrl === canonicalUrl;
+      if (hasPending || isProcessing) {
+        console.debug('[YouTube] ⏭️  Already processing/displaying this video link, ignoring re-hover', {
+          hasPending,
+          isProcessing,
+          url: canonicalUrl
+        });
         return;
       }
       const isSwitch = currentlyProcessingUrl && currentlyProcessingUrl !== canonicalUrl;
       if (isSwitch) {
-        console.log(`[YouTube] 🔴 SWITCHING FROM ${currentlyProcessingUrl} TO ${canonicalUrl}`);
+        console.debug(`[YouTube] 🔴 SWITCHING FROM ${currentlyProcessingUrl} TO ${canonicalUrl}`);
         const oldVideoId = extractYouTubeVideoId(currentlyProcessingUrl);
         chrome.runtime.sendMessage({
           action: 'ABORT_YOUTUBE_SUMMARY',
           videoId: oldVideoId,
           newVideoId: videoId
         }, response => {
-          console.log(`[YouTube] Abort response:`, response);
+          console.debug('[YouTube] Abort response:', response);
         });
       }
-      currentlyProcessingUrl = canonicalUrl;
-      if (currentHoverTimeout) {
-        clearTimeout(currentHoverTimeout);
-        currentHoverTimeout = null;
-      }
+      const requestToken = ++currentYouTubeRequestToken;
+      link.__hoverRequestToken = requestToken;
       const oldTimeout = hoverTimeouts.get(canonicalUrl);
       if (oldTimeout) {
-        clearTimeout(oldTimeout);
+        clearTimeout(oldTimeout.timeoutId);
+        hoverTimeouts.delete(canonicalUrl);
       }
       if (hideTimeout) {
         clearTimeout(hideTimeout);
@@ -1337,11 +1342,19 @@
       }
       currentHoveredElement = link;
       const hoverTimeout = setTimeout(() => {
+        console.log('[YouTube] Hover timeout firing for link', canonicalUrl, {
+          requestToken,
+          currentToken: currentYouTubeRequestToken,
+          pendingUrl: currentlyProcessingUrl
+        });
         hoverTimeouts.delete(canonicalUrl);
         handleYouTubeVideoHover(cardElement, link, canonicalUrl, requestToken);
       }, HOVER_DELAY);
-      hoverTimeouts.set(canonicalUrl, hoverTimeout);
-      currentHoverTimeout = hoverTimeout;
+      hoverTimeouts.set(canonicalUrl, { timeoutId: hoverTimeout, requestToken });
+      console.log('[YouTube] Hover timeout scheduled for link', {
+        url: canonicalUrl,
+        requestToken
+      });
       return;
     }
     
@@ -1420,12 +1433,14 @@
                               e.target.closest('ytd-playlist-thumbnail');
       
       if (relatedTarget && thumbnailElement && thumbnailElement.contains(relatedTarget)) {
+        console.log('[YouTube] Mouseout within same thumbnail, keeping hover alive', { url });
         return;
       }
       
       const pendingTimeout = hoverTimeouts.get(url);
       if (pendingTimeout) {
-        clearTimeout(pendingTimeout);
+        console.log('[YouTube] Mouseout clearing pending hover', { url, requestToken: pendingTimeout.requestToken });
+        clearTimeout(pendingTimeout.timeoutId);
         hoverTimeouts.delete(url);
       }
       
@@ -1742,8 +1757,8 @@
       const isValid = message.url === currentlyProcessingUrl;
       if (!isValid) {
         if (IS_YOUTUBE) {
-          console.log(`[YouTube] REJECTED stale update for: ${message.url}`);
-          console.log(`  Currently processing: ${currentlyProcessingUrl}`);
+          console.debug(`[YouTube] REJECTED stale update for: ${message.url}`);
+          console.debug(`  Currently processing: ${currentlyProcessingUrl}`);
         }
         return;
       }
@@ -1908,9 +1923,17 @@
   }
 
   async function handleYouTubeVideoHover(anchorElement, linkElement, url, requestToken) {
-    console.log('[YouTube] Video hover detected:', url);
+    console.log('[YouTube] Hover handler start', {
+      url,
+      requestToken,
+      currentToken: currentYouTubeRequestToken,
+      currentlyProcessingUrl
+    });
     if (requestToken !== currentYouTubeRequestToken) {
-      console.log('[YouTube] Stale hover request, ignoring');
+      console.warn('[YouTube] Stale hover request, ignoring', {
+        requestToken,
+        currentToken: currentYouTubeRequestToken
+      });
       return;
     }
     const videoId = extractYouTubeVideoId(url);
@@ -1944,17 +1967,24 @@
       }
     }, 30000);
 
-    await Promise.race([
-      waitForYouTubeCaptions(videoId).catch(() => {}),
-      new Promise(resolve => setTimeout(resolve, 300))
-    ]);
+    try {
+      await waitForYouTubeCaptions(videoId);
+      console.debug('[YouTube] Captions ready before summary request:', videoId);
+    } catch (error) {
+      console.warn('[YouTube] Captions did not arrive in time, continuing anyway:', videoId, error && error.message ? error.message : error);
+    }
 
     if (displayMode === 'tooltip' || displayMode === 'both') {
       showTooltip(tooltipAnchor, '<div style="text-align:center;padding:16px;opacity:0.75;">Generating summary…</div>', url, tooltipOptions);
     }
     if (requestToken !== currentYouTubeRequestToken) {
+      console.warn('[YouTube] Request token changed after caption wait, aborting send', {
+        requestToken,
+        currentToken: currentYouTubeRequestToken
+      });
       return;
     }
+    console.log('[YouTube] Sending GET_YOUTUBE_SUMMARY', { videoId, url, requestToken });
     chrome.runtime.sendMessage({
       action: 'GET_YOUTUBE_SUMMARY',
       videoId,
@@ -1962,6 +1992,10 @@
     }, (response) => {
       clearTimeout(summaryTimeout);
       if (requestToken !== currentYouTubeRequestToken) {
+        console.warn('[YouTube] Request token changed before response handling', {
+          requestToken,
+          currentToken: currentYouTubeRequestToken
+        });
         return;
       }
       if (chrome.runtime.lastError) {
@@ -1973,9 +2007,11 @@
         return;
       }
       if (!response) {
+        console.warn('[YouTube] Empty response from background');
         currentlyProcessingUrl = null;
         return;
       }
+      console.debug('[YouTube] Summary response payload:', response);
       if (response.status === 'complete') {
         const summary = response.summary || 'No summary generated';
         const formatted = formatAISummary(summary);
