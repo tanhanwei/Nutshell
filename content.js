@@ -195,7 +195,8 @@
   
   const handleTooltipKeyDown = (event) => {
     if (event.key === 'Escape' && tooltip && tooltip.style.display === 'block') {
-      hideTooltip();
+      event.preventDefault();
+      cancelActiveSummary('escape_key');
     }
   };
   
@@ -211,6 +212,48 @@
     document.removeEventListener('pointerdown', handleTooltipPointerDown, true);
     document.removeEventListener('keydown', handleTooltipKeyDown, true);
     tooltipCloseHandlerAttached = false;
+  }
+
+  function cancelActiveSummary(reason = 'user_cancel') {
+    const previousUrl = currentlyProcessingUrl;
+    const wasYouTube = previousUrl ? (() => {
+      try {
+        const parsed = new URL(previousUrl, window.location.origin);
+        return YOUTUBE_HOSTS.has(parsed.hostname.toLowerCase());
+      } catch (error) {
+        return false;
+      }
+    })() : false;
+    
+    if (currentHoverTimeout) {
+      clearTimeout(currentHoverTimeout);
+      currentHoverTimeout = null;
+    }
+    hoverTimeouts.forEach(({ timeoutId }) => {
+      clearTimeout(timeoutId);
+    });
+    hoverTimeouts.clear();
+    
+    hideTooltip();
+    
+    currentlyProcessingUrl = null;
+    processingElement = null;
+    currentHoveredElement = null;
+    
+    if (IS_TWITTER) {
+      clearTwitterState();
+    }
+    
+    if (wasYouTube) {
+      const videoId = extractYouTubeVideoId(previousUrl);
+      if (videoId) {
+        chrome.runtime.sendMessage({
+          action: 'ABORT_YOUTUBE_SUMMARY',
+          videoId,
+          reason
+        });
+      }
+    }
   }
   
   // ============ Twitter-Specific Helpers ============
@@ -1969,7 +2012,7 @@
 
     try {
       await waitForYouTubeCaptions(videoId);
-      console.debug('[YouTube] Captions ready before summary request:', videoId);
+    console.log('[YouTube] Captions ready before summary request:', videoId);
     } catch (error) {
       console.warn('[YouTube] Captions did not arrive in time, continuing anyway:', videoId, error && error.message ? error.message : error);
     }
@@ -2011,7 +2054,7 @@
         currentlyProcessingUrl = null;
         return;
       }
-      console.debug('[YouTube] Summary response payload:', response);
+      console.log('[YouTube] Summary response payload:', response);
       if (response.status === 'complete') {
         const summary = response.summary || 'No summary generated';
         const formatted = formatAISummary(summary);
