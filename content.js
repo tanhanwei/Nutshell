@@ -59,9 +59,13 @@
   let hoverTimeouts = new Map(); // Track hover timeouts per URL (url -> {timeoutId, requestToken})
   const summaryStateByVideo = new Map(); // videoId -> {status, html, text, url, updatedAt}
   let shortcutSummaryVideoId = null;
+  let hoverGuardActive = false;
+  let hoverGuardReady = false;
+  let lastHoveredYouTubeItem = null;
 
   const isTooltipMode = () => displayMode === 'tooltip' || displayMode === 'both';
   const isPanelMode = () => displayMode === 'panel' || displayMode === 'sidepanel' || displayMode === 'both';
+  const isOnYouTubeWatchPage = () => IS_YOUTUBE && window.location.pathname.startsWith('/watch');
 
   // Twitter-specific state
   const twitterGqlCache = new Map(); // tweetId -> array of captured JSON blobs
@@ -286,6 +290,15 @@
         });
       }
     }
+    if (isOnYouTubeWatchPage()) {
+      hoverGuardActive = true;
+      hoverGuardReady = false;
+      lastHoveredYouTubeItem = null;
+    } else {
+      hoverGuardActive = false;
+      hoverGuardReady = false;
+      lastHoveredYouTubeItem = null;
+    }
   }
 
   function clearShortcutSummary() {
@@ -398,6 +411,9 @@
     }
     shortcutSummaryVideoId = videoId;
     shortcutSummaryUrl = state.url || shortcutSummaryUrl || `https://www.youtube.com/watch?v=${videoId}`;
+    if ((state.status === 'complete' || state.status === 'error') && isOnYouTubeWatchPage()) {
+      hoverGuardReady = true;
+    }
   }
 
   function maybeAutoloadInlineSummary(forcePlaceholder = false) {
@@ -424,10 +440,14 @@
         url: window.location.href,
         force: true
       });
-      requestCachedSummary(videoId);
+      if (isOnYouTubeWatchPage()) {
+        requestCachedSummary(videoId);
+      }
     } else {
       clearShortcutSummary();
-      requestCachedSummary(videoId);
+      if (isOnYouTubeWatchPage()) {
+        requestCachedSummary(videoId);
+      }
     }
   }
 
@@ -1432,6 +1452,7 @@
   
   function findYouTubeCardElement(element) {
     if (!element) return null;
+    if (!IS_YOUTUBE) return null;
     const selectors = [
       'ytd-rich-grid-video-renderer',
       'ytd-video-renderer',
@@ -1446,6 +1467,24 @@
       if (card) return card;
     }
     return null;
+  }
+
+  function refineYouTubeTooltipAnchor(anchor, link) {
+    if (!anchor) return link || anchor;
+    if (!IS_YOUTUBE) return anchor;
+    const watchers = anchor.querySelectorAll('#meta');
+    if (watchers && watchers.length) {
+      const meta = watchers[0];
+      const thumb = anchor.querySelector('ytd-thumbnail,a#thumbnail');
+      if (thumb && meta) {
+        return meta;
+      }
+    }
+    const secondary = anchor.querySelector('#details') || anchor.querySelector('#meta');
+    if (secondary) {
+      return secondary;
+    }
+    return anchor;
   }
   
   // Handle mouseover
@@ -1575,8 +1614,9 @@
       }
 
       const cardElement = findYouTubeCardElement(thumbnailElement) || thumbnailElement || link;
-      link.__hoverAnchor = cardElement;
-      thumbnailElement.__hoverAnchor = cardElement;
+      const tooltipAnchor = refineYouTubeTooltipAnchor(cardElement, link);
+      link.__hoverAnchor = tooltipAnchor;
+      thumbnailElement.__hoverAnchor = tooltipAnchor;
       link.__hoverCanonicalUrl = canonicalUrl;
       const isSwitch = currentlyProcessingUrl && currentlyProcessingUrl !== canonicalUrl;
       if (isSwitch) {
@@ -1617,7 +1657,7 @@
           pendingUrl: currentlyProcessingUrl
         });
         hoverTimeouts.delete(canonicalUrl); // Clean up
-        handleYouTubeVideoHover(cardElement, link, canonicalUrl, requestToken);
+        handleYouTubeVideoHover(tooltipAnchor, link, canonicalUrl, requestToken);
       }, HOVER_DELAY);
 
       // Store timeout for this URL
@@ -1643,7 +1683,8 @@
       const canonicalUrl = `https://www.youtube.com/watch?v=${videoId}`;
       link.__hoverCanonicalUrl = canonicalUrl;
       const cardElement = findYouTubeCardElement(link) || link;
-      link.__hoverAnchor = cardElement;
+      const tooltipAnchor = refineYouTubeTooltipAnchor(cardElement, link);
+      link.__hoverAnchor = tooltipAnchor;
       const hasPending = hoverTimeouts.has(canonicalUrl);
       const isProcessing = currentlyProcessingUrl === canonicalUrl;
       if (hasPending || isProcessing) {
@@ -1685,7 +1726,7 @@
           pendingUrl: currentlyProcessingUrl
         });
         hoverTimeouts.delete(canonicalUrl);
-        handleYouTubeVideoHover(cardElement, link, canonicalUrl, requestToken);
+        handleYouTubeVideoHover(tooltipAnchor, link, canonicalUrl, requestToken);
       }, HOVER_DELAY);
       hoverTimeouts.set(canonicalUrl, { timeoutId: hoverTimeout, requestToken });
       console.log('[YouTube] Hover timeout scheduled for link', {
@@ -1756,7 +1797,7 @@
       }
       return;
     }
-    
+
     const url = link.__hoverCanonicalUrl || link.href;
     const anchorElement = link.__hoverAnchor;
     const tweetInfoMouseOut = link.__hoverTweetInfo || (IS_TWITTER ? getTweetInfoFromArticle(link.closest && link.closest('article[role="article"]')) : null);
@@ -1784,6 +1825,14 @@
       // Allow general logic below to decide whether to hide tooltip; skip additional handling
     }
     
+    if (isOnYouTubeWatchPage() && hoverGuardReady && link === lastHoveredYouTubeItem) {
+      const relatedTarget = e.relatedTarget;
+      const leavingSame = relatedTarget && (link === relatedTarget || link.contains(relatedTarget));
+      if (!leavingSame) {
+        lastHoveredYouTubeItem = null;
+      }
+    }
+
     // Check if we're actually leaving the link (not just moving to a child element or tooltip)
     const relatedTarget = e.relatedTarget;
     if (relatedTarget) {
@@ -2326,6 +2375,17 @@
       currentToken: currentYouTubeRequestToken,
       currentlyProcessingUrl
     });
+    if (!options.forceInline && hoverGuardActive && isOnYouTubeWatchPage()) {
+      if (!hoverGuardReady) {
+        console.log('[YouTube] Hover guard active - blocking hover summary');
+        return;
+      }
+      if (linkElement && lastHoveredYouTubeItem === linkElement) {
+        console.log('[YouTube] Hover guard awaiting fresh hover after completion');
+        return;
+      }
+      hoverGuardActive = false;
+    }
     if (requestToken !== currentYouTubeRequestToken) {
       console.warn('[YouTube] Stale hover request, ignoring', {
         requestToken,
@@ -2338,6 +2398,9 @@
       console.warn('[YouTube] Could not extract video ID from:', url);
       currentlyProcessingUrl = null;
       return;
+    }
+    if (linkElement && isOnYouTubeWatchPage()) {
+      lastHoveredYouTubeItem = linkElement;
     }
     const tooltipAnchor = anchorElement || linkElement;
     let tooltipPlacement = 'right';
