@@ -7,10 +7,12 @@
     "sidePanel",
     "storage",
     "tabs",
-    "scripting"
+    "scripting",
+    "cookies"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "<all_urls>",
+    "https://*.youtube.com/"
   ],
   "background": {
     "service_worker": "background.js"
