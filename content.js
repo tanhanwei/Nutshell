@@ -2399,6 +2399,13 @@
       currentlyProcessingUrl = null;
       return;
     }
+    try {
+      if (window.prefetchYouTubeTranscript) {
+        await window.prefetchYouTubeTranscript(videoId);
+      }
+    } catch (prefetchError) {
+      console.warn('[YouTube] Transcript prefetch error for', videoId, prefetchError?.message || prefetchError);
+    }
     if (linkElement && isOnYouTubeWatchPage()) {
       lastHoveredYouTubeItem = linkElement;
     }

@@ -153,10 +153,14 @@ const summaryCache = new Map();
 const youtubeCaptionCache = new Map(); // Cache for YouTube caption data
 const youtubeSummaryCache = new Map(); // Cache for YouTube summaries
 const youtubeDescriptionCache = new Map(); // Cache for YouTube video descriptions
+const youtubeTranscriptParamsCache = new Map(); // Cache for transcript params
+const youtubeChannelCache = new Map(); // Cache for video -> channel mapping
 const twitterThreadCache = new Map(); // Cache for Twitter conversation scrapes
 const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
 const TWITTER_THREAD_TTL = 5 * 60 * 1000; // 5 minutes
 const YOUTUBE_DEBUG_LOG_FULL_INPUT = true; // Toggle to emit full summarization input for debugging
+const MIN_TRANSCRIPT_PARAM_LENGTH = 100;
+const ENABLE_YOUTUBE_TIMEDTEXT_FALLBACK = false;
 
 let currentAbortController = null;
 let isProcessingSummary = false;
@@ -1199,44 +1203,86 @@ async function handleSummarizeRedditPost(message, sender) {
 /**
  * Parse caption data from various YouTube formats
  */
+function sanitizeCaptionResponse(data) {
+  if (typeof data !== 'string') {
+    return data;
+  }
+  let trimmed = data;
+  if (typeof trimmed.trimStart === 'function') {
+    trimmed = trimmed.trimStart();
+  }
+  if (trimmed.startsWith(")]}'")) {
+    const newlineIndex = trimmed.indexOf('\n');
+    trimmed = newlineIndex === -1 ? '' : trimmed.slice(newlineIndex + 1);
+  }
+  return trimmed.trim();
+}
+
 function parseCaptionData(data) {
   try {
     if (typeof data === 'string') {
+      const sanitized = sanitizeCaptionResponse(data);
       // Try JSON3 format first
-      if (data.includes('"events"') || data.includes('"wireMagic"')) {
-        const jsonData = JSON.parse(data);
-        if (jsonData.events) {
-          return jsonData.events
-            .map(event => {
-              if (event.segs) {
-                const text = event.segs.map(seg => seg.utf8 || '').join('');
-                return {
-                  start: (event.tStartMs || 0) / 1000,
-                  duration: (event.dDurationMs || 0) / 1000,
-                  text: text
-                };
-              }
-              return null;
-            })
-            .filter(Boolean);
+      if (sanitized.includes('"events"') || sanitized.includes('"wireMagic"')) {
+        try {
+          const jsonData = JSON.parse(sanitized);
+          if (Array.isArray(jsonData.events)) {
+            const captions = [];
+            for (const event of jsonData.events) {
+              if (!event) continue;
+              const segments = Array.isArray(event.segs) ? event.segs : [];
+              if (!segments.length) continue;
+              const text = segments.map(seg => (seg && typeof seg.utf8 === 'string') ? seg.utf8 : '').join('');
+              captions.push({
+                start: (event.tStartMs || 0) / 1000,
+                duration: (event.dDurationMs || 0) / 1000,
+                text
+              });
+            }
+            if (captions.length) {
+              return captions;
+            }
+          }
+        } catch (jsonError) {
+          console.warn('[YouTube] JSON caption parse failed, trying XML fallback:', jsonError?.message || jsonError);
         }
       }
       
       // Try XML format
-      if (data.includes('<?xml') || data.includes('<transcript>')) {
+      if (sanitized.includes('<?xml') || sanitized.includes('<transcript>') || sanitized.includes('<text ')) {
         const parser = new DOMParser();
-        const xmlDoc = parser.parseFromString(data, 'text/xml');
+        const xmlDoc = parser.parseFromString(sanitized, 'text/xml');
         const texts = xmlDoc.getElementsByTagName('text');
-        return Array.from(texts).map(node => ({
-          start: parseFloat(node.getAttribute('start') || 0),
-          duration: parseFloat(node.getAttribute('dur') || 0),
-          text: node.textContent
-        }));
+        if (texts && texts.length) {
+          return Array.from(texts).map(node => ({
+            start: parseFloat(node.getAttribute('start') || 0),
+            duration: parseFloat(node.getAttribute('dur') || 0),
+            text: node.textContent
+          }));
+        }
       }
       
-      // Try standard JSON
-      if (data.trim().startsWith('[') || data.trim().startsWith('{')) {
-        return JSON.parse(data);
+      // Try standard JSON fallback
+      const trimmed = sanitized.trim();
+      if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+        return JSON.parse(trimmed);
+      }
+    } else if (data && typeof data === 'object') {
+      const events = data.events || data;
+      if (Array.isArray(events)) {
+        return events
+          .map(event => {
+            if (!event) return null;
+            const segments = Array.isArray(event.segs) ? event.segs : [];
+            if (!segments.length) return null;
+            const text = segments.map(seg => (seg && typeof seg.utf8 === 'string') ? seg.utf8 : '').join('');
+            return {
+              start: (event.tStartMs || 0) / 1000,
+              duration: (event.dDurationMs || 0) / 1000,
+              text
+            };
+          })
+          .filter(Boolean);
       }
     }
     
@@ -1260,7 +1306,149 @@ function captionsToText(captions) {
     .trim();
 }
 
-async function fetchYouTubeDescription(videoId, url) {
+const textEncoder = new TextEncoder();
+
+function encodeVarint(value) {
+  const bytes = [];
+  let v = value >>> 0;
+  while (v > 0x7f) {
+    bytes.push((v & 0x7f) | 0x80);
+    v >>>= 7;
+  }
+  bytes.push(v);
+  return Uint8Array.from(bytes);
+}
+
+function encodeFieldKey(fieldNumber, wireType) {
+  return Uint8Array.from([(fieldNumber << 3) | wireType]);
+}
+
+function concatUint8Arrays(arrays) {
+  let totalLength = 0;
+  for (const arr of arrays) {
+    totalLength += arr.length;
+  }
+  const merged = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const arr of arrays) {
+    merged.set(arr, offset);
+    offset += arr.length;
+  }
+  return merged;
+}
+
+function encodeLengthDelimited(fieldNumber, data) {
+  const key = encodeFieldKey(fieldNumber, 2);
+  const length = encodeVarint(data.length);
+  return concatUint8Arrays([key, length, data]);
+}
+
+function base64UrlEncode(bytes, stripPadding) {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  let base64 = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_');
+  if (stripPadding) {
+    base64 = base64.replace(/=+$/, '');
+  }
+  return base64;
+}
+
+function buildTranscriptParams(videoId, channelId, isAutoGenerated) {
+  if (!videoId || !channelId) return null;
+  const trackKind = isAutoGenerated ? 1 : 0;
+  const innerParts = [];
+  innerParts.push(encodeLengthDelimited(1, textEncoder.encode(videoId)));
+  innerParts.push(encodeLengthDelimited(2, textEncoder.encode(channelId)));
+  innerParts.push(concatUint8Arrays([encodeFieldKey(3, 0), encodeVarint(trackKind)]));
+  const innerMessage = concatUint8Arrays(innerParts);
+  const outer = encodeLengthDelimited(1, innerMessage);
+  const single = base64UrlEncode(outer, false);
+  const double = base64UrlEncode(textEncoder.encode(single), false);
+  return double;
+}
+
+function normalizeTranscriptParams(paramStr) {
+  if (!paramStr || typeof paramStr !== 'string') return null;
+  let normalized = paramStr;
+  try {
+    normalized = decodeURIComponent(normalized);
+  } catch (error) {
+    // ignore decode failures
+  }
+  return normalized;
+}
+
+function storeTranscriptParams(videoId, paramStr) {
+  if (!videoId || !paramStr) return;
+  const normalized = normalizeTranscriptParams(paramStr);
+  if (!normalized || normalized.length < MIN_TRANSCRIPT_PARAM_LENGTH) return;
+  const current = youtubeTranscriptParamsCache.get(videoId);
+  if (current && current.length >= normalized.length) {
+    return;
+  }
+  youtubeTranscriptParamsCache.set(videoId, normalized);
+}
+
+function extractQuotedValue(html, key) {
+  const pattern = new RegExp(`"${key}":"([^"]+)"`);
+  const match = pattern.exec(html);
+  return match ? match[1] : null;
+}
+
+function extractJsonForKey(html, key) {
+  const target = `"${key}":`;
+  const index = html.indexOf(target);
+  if (index === -1) return null;
+  let cursor = index + target.length;
+  while (cursor < html.length && /\s/.test(html[cursor])) {
+    cursor++;
+  }
+  if (cursor >= html.length || html[cursor] !== '{') {
+    return null;
+  }
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = cursor; i < html.length; i++) {
+    const char = html[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (char === '\\') {
+      escape = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (!inString) {
+      if (char === '{') {
+        depth++;
+      } else if (char === '}') {
+        depth--;
+        if (depth === 0) {
+          return html.slice(cursor, i + 1);
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function safeJsonParse(jsonString) {
+  try {
+    return JSON.parse(jsonString);
+  } catch (error) {
+    console.warn('[YouTube] Failed to parse JSON snippet:', error?.message || error);
+    return null;
+  }
+}
+
+async function fetchYouTubeMetadata(videoId, url) {
   const fallbackUrl = `https://www.youtube.com/watch?v=${videoId}`;
   let targetUrl = fallbackUrl;
   
@@ -1275,48 +1463,116 @@ async function fetchYouTubeDescription(videoId, url) {
     }
   }
   
-  console.log('[YouTube] Fetching description from:', targetUrl);
+  console.log('[YouTube] Fetching metadata from:', targetUrl);
   const response = await fetch(targetUrl);
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status} fetching description`);
+    throw new Error(`HTTP ${response.status} fetching watch page`);
   }
   const html = await response.text();
-  const description = extractYouTubeDescriptionFromHtml(html);
-  if (description) {
-    console.log('[YouTube] Description fetched successfully. Length:', description.length);
+  const metadata = extractYouTubeMetadataFromHtml(html);
+  if (metadata.description) {
+    console.log('[YouTube] Description fetched successfully. Length:', metadata.description.length);
   } else {
     console.warn('[YouTube] Description not found in fetched HTML.');
   }
-  return description ? description.trim() : null;
+  if (metadata.captionTracks && metadata.captionTracks.length) {
+    console.log('[YouTube] Found caption tracks:', metadata.captionTracks.length);
+  } else {
+    console.warn('[YouTube] No caption tracks found in metadata.');
+  }
+  if (metadata.innertube) {
+    console.log('[YouTube] Captured Innertube config for fallback.');
+  } else {
+    console.warn('[YouTube] Innertube config missing from fetched HTML.');
+  }
+  return metadata;
 }
 
-function extractYouTubeDescriptionFromHtml(html) {
-  if (!html) return null;
+function extractYouTubeMetadataFromHtml(html) {
+  const result = {
+    description: null,
+    captionTracks: [],
+    innertube: null,
+    channelId: null
+  };
+  if (!html) return result;
+  
+  const apiKey = extractQuotedValue(html, 'INNERTUBE_API_KEY');
+  const clientName = extractQuotedValue(html, 'INNERTUBE_CONTEXT_CLIENT_NAME') || extractQuotedValue(html, 'INNERTUBE_CLIENT_NAME');
+  const clientVersion = extractQuotedValue(html, 'INNERTUBE_CONTEXT_CLIENT_VERSION') || extractQuotedValue(html, 'INNERTUBE_CLIENT_VERSION');
+  const visitorData = extractQuotedValue(html, 'VISITOR_DATA');
+  const signatureTimestampRaw = extractQuotedValue(html, 'STS');
+  const signatureTimestamp = signatureTimestampRaw ? parseInt(signatureTimestampRaw, 10) : null;
+  const contextSnippet = extractJsonForKey(html, 'INNERTUBE_CONTEXT');
+  const contextObject = contextSnippet ? safeJsonParse(contextSnippet) : null;
+  
+  if (apiKey && clientName && clientVersion) {
+    result.innertube = {
+      apiKey,
+      clientName,
+      clientVersion,
+      visitorData: visitorData || null,
+      context: contextObject || null,
+      signatureTimestamp: Number.isFinite(signatureTimestamp) ? signatureTimestamp : null
+    };
+  }
   
   const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*(\{.*?\})\s*;/s);
   if (playerMatch) {
     try {
       const data = JSON.parse(playerMatch[1]);
       const desc = data?.videoDetails?.shortDescription;
+      const channelId = data?.videoDetails?.channelId || data?.microformat?.playerMicroformatRenderer?.channelId || null;
+      if (channelId) {
+        result.channelId = channelId;
+      }
       if (desc && desc.trim()) {
-        return desc.trim();
+        result.description = desc.trim();
+      }
+      const captionTracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+      if (Array.isArray(captionTracks)) {
+        result.captionTracks = captionTracks.map(track => ({
+          baseUrl: track.baseUrl,
+          languageCode: track.languageCode,
+          name: track.name?.simpleText || null,
+          kind: track.kind || null,
+          isAutoGenerated: track.kind === 'asr'
+        })).filter(track => track.baseUrl);
+      }
+      const transcriptParamsFromPlayer = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.find((track) => typeof track.params === 'string')?.params || null;
+      if (transcriptParamsFromPlayer) {
+        result.transcriptParams = normalizeTranscriptParams(transcriptParamsFromPlayer);
       }
     } catch (error) {
       console.warn('[YouTube] Failed to parse ytInitialPlayerResponse:', error);
     }
   }
+
+  if (!result.transcriptParams) {
+    const transcriptMatch = html.match(/"getTranscriptEndpoint"\s*:\s*\{\s*"params"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/);
+    if (transcriptMatch && transcriptMatch[1]) {
+      try {
+        const decodedParam = JSON.parse(`"${transcriptMatch[1]}"`);
+        result.transcriptParams = normalizeTranscriptParams(decodedParam);
+      } catch (error) {
+        console.warn('[YouTube] Failed to decode transcript params from HTML:', error);
+      }
+    }
+  }
   
   const metaMatch = html.match(/<meta\s+(?:itemprop|name|property)=["']description["']\s+content=["']([^"']*)["']/i);
   if (metaMatch && metaMatch[1]) {
-    return decodeHtmlEntities(metaMatch[1]);
+    result.description = decodeHtmlEntities(metaMatch[1]);
+    return result;
   }
   
   const ogMatch = html.match(/<meta\s+property=["']og:description["']\s+content=["']([^"']*)["']/i);
   if (ogMatch && ogMatch[1]) {
-    return decodeHtmlEntities(ogMatch[1]);
+    result.description = decodeHtmlEntities(ogMatch[1]);
+    return result;
   }
   
-  return null;
+  return result;
 }
 
 function decodeHtmlEntities(str) {
@@ -1488,21 +1744,35 @@ async function handleYouTubeSummary(videoId, url, tabId) {
   
   // Check if captions are cached
   let captionData = youtubeCaptionCache.get(videoId);
+  let cachedChannelId = youtubeChannelCache.get(videoId) || null;
   let descriptionData = youtubeDescriptionCache.get(videoId);
+  let transcriptUnavailable = false;
   
   if (!descriptionData) {
-    descriptionData = await fetchYouTubeDescription(videoId, url).catch((error) => {
-      console.warn('[YouTube] Description fetch failed:', error?.message || error);
+    descriptionData = await fetchYouTubeMetadata(videoId, url).catch((error) => {
+      console.warn('[YouTube] Metadata fetch failed:', error?.message || error);
       return null;
     });
     if (descriptionData) {
       youtubeDescriptionCache.set(videoId, {
-        description: descriptionData,
+        data: descriptionData,
         timestamp: Date.now()
       });
     }
   } else {
-    descriptionData = descriptionData.description;
+    descriptionData = descriptionData.data;
+  }
+
+  if (descriptionData?.channelId) {
+    youtubeChannelCache.set(videoId, descriptionData.channelId);
+    cachedChannelId = descriptionData.channelId;
+  } else if (cachedChannelId) {
+    descriptionData = descriptionData || {};
+    descriptionData.channelId = cachedChannelId;
+  }
+
+  if (descriptionData?.transcriptParams) {
+    storeTranscriptParams(videoId, descriptionData.transcriptParams);
   }
   
   if (!captionData) {
@@ -1516,80 +1786,121 @@ async function handleYouTubeSummary(videoId, url, tabId) {
       }
       targetTabId = tabs[0].id;
     }
-    
-    // Poll the bridge a few times in case captions are still loading
-    const MAX_ATTEMPTS = 6;
-    const RETRY_DELAY_MS = 500;
-    
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS && !captionData; attempt++) {
+
+    const MAX_ATTEMPTS = 2;
+    const RETRY_DELAY_MS = 250;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS && !captionData && !transcriptUnavailable; attempt++) {
       if (currentYouTubeAbortController?.signal?.aborted) {
         throw new DOMException('Aborted', 'AbortError');
       }
-      
       try {
         const response = await chrome.tabs.sendMessage(targetTabId, {
           action: 'GET_YOUTUBE_CAPTIONS',
-          videoId: videoId
+          videoId
         });
-        
         if (response && response.success && response.data) {
           captionData = response.data;
+          if (captionData.transcriptParams) {
+            storeTranscriptParams(videoId, captionData.transcriptParams);
+          }
+          if (captionData.channelId) {
+            descriptionData = descriptionData || {};
+            descriptionData.channelId = descriptionData.channelId || captionData.channelId;
+          }
           youtubeCaptionCache.set(videoId, {
             data: captionData,
             timestamp: captionData.timestamp || Date.now()
           });
-          console.log('[YouTube] Captions received on attempt', attempt);
+          console.log('[YouTube] Captions received from bridge (attempt', attempt, ')');
           break;
         }
-        
         const error = response?.error || 'UNKNOWN_ERROR';
-        console.log('[YouTube] Caption attempt', attempt, 'failed:', error);
-        
-        if (error !== 'NO_CAPTIONS' && error !== 'TIMEOUT') {
+        console.log('[YouTube] Bridge caption attempt', attempt, 'failed:', error);
+        if (error === 'NO_PARAMS') {
+          transcriptUnavailable = true;
+          break;
+        }
+        if (error === 'NO_CAPTIONS' || error === 'TIMEOUT') {
+          await delay(RETRY_DELAY_MS);
+        } else {
           throw new Error(error);
         }
       } catch (error) {
-        if (error && error.message === 'NO_CAPTIONS') {
-          console.log('[YouTube] Caption attempt', attempt, 'reported no captions yet.');
-        } else if (error && error.message === 'No tab with id') {
+        if (error && error.message === 'No tab with id') {
           throw new Error('YouTube tab no longer available');
-        } else {
-          console.error('[YouTube] Error getting captions:', error);
-          if (attempt === MAX_ATTEMPTS && !descriptionData) {
-            return {
-              status: 'error',
-              error: 'NO_CAPTIONS',
-              message: 'Could not retrieve captions for this video'
-            };
-          }
         }
-      }
-      
-      if (!captionData && attempt < MAX_ATTEMPTS) {
+        const message = error?.message || error;
+        if (message === 'NO_PARAMS') {
+          transcriptUnavailable = true;
+          break;
+        }
+        console.warn('[YouTube] Bridge caption attempt error:', message);
         await delay(RETRY_DELAY_MS);
       }
     }
-    
+
+    if (!captionData && !transcriptUnavailable && descriptionData?.captionTracks?.length) {
+      console.log('[YouTube] Player metadata available; skipping timedtext track fetch in favor of transcript strategy');
+      const trackWithParams = descriptionData.captionTracks.find((track) => typeof track?.params === 'string' && track.params.length >= MIN_TRANSCRIPT_PARAM_LENGTH);
+      if (trackWithParams?.params) {
+        storeTranscriptParams(videoId, trackWithParams.params);
+      }
+    }
+
+    if (!captionData && !transcriptUnavailable) {
+      if (ENABLE_YOUTUBE_TIMEDTEXT_FALLBACK) {
+        console.log('[YouTube] Bridge/metadata failed, attempting direct timedtext fetch...');
+        const direct = await fetchYouTubeCaptionsDirect(videoId);
+        if (direct && direct.success && Array.isArray(direct.captions) && direct.captions.length) {
+          const directChannelId = descriptionData?.channelId || null;
+          captionData = {
+            videoId,
+            captions: direct.captions,
+            text: captionsToText(direct.captions),
+            timestamp: Date.now(),
+            source: 'directAPI',
+            channelId: directChannelId,
+            transcriptParams: youtubeTranscriptParamsCache.get(videoId) || null
+          };
+          youtubeCaptionCache.set(videoId, {
+            data: captionData,
+            timestamp: captionData.timestamp
+          });
+          console.log('[YouTube] Direct caption fetch succeeded with', direct.captions.length, 'entries');
+        } else {
+          console.warn('[YouTube] Direct caption fetch returned no captions');
+        }
+      } else {
+        console.log('[YouTube] Timedtext fallback disabled; skipping direct caption fetch');
+      }
+    }
+
     if (!captionData) {
-      console.warn('[YouTube] Failed to retrieve captions after retries');
-      if (!descriptionData) {
-        return {
-          status: 'error',
-          error: 'NO_CAPTIONS',
-          message: 'Could not retrieve captions for this video'
-        };
+      if (transcriptUnavailable) {
+        console.warn('[YouTube] Transcript token unavailable; skipping timedtext fallback');
+      } else {
+        console.warn('[YouTube] No captions retrieved via bridge or direct fetch');
       }
     }
   } else {
     console.log('[YouTube] Using cached caption data');
     captionData = captionData.data;
   }
-  
+
   // The captionData is now an object: {videoId, captions, text, timestamp}
   // Check if we have the captions array
   const captionArray = captionData?.captions || [];
   const captionText = captionData?.text || captionsToText(captionArray);
-  const descriptionText = descriptionData || '';
+  const captionChannelId = captionData?.channelId || descriptionData?.channelId || cachedChannelId || null;
+  if (captionChannelId) {
+    youtubeChannelCache.set(videoId, captionChannelId);
+    cachedChannelId = captionChannelId;
+  }
+  const captionParams = captionData?.transcriptParams || youtubeTranscriptParamsCache.get(videoId) || null;
+  if (captionParams) {
+    storeTranscriptParams(videoId, captionParams);
+  }
+  const descriptionText = descriptionData?.description || '';
   
   if ((!captionText || captionText.length < 10) && (!descriptionText || descriptionText.length < 20)) {
     return {
@@ -1788,6 +2099,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     
     return true; // Keep channel open for async response
   }
+
+  if (message.action === 'CACHE_YT_METADATA') {
+    const videoId = message.videoId;
+    const transcriptParams = message.transcriptParams;
+    const channelId = message.channelId;
+    const transcriptSource = message.transcriptSource || null;
+    const transcriptLength = message.transcriptLength || 0;
+    if (videoId) {
+      if (typeof transcriptParams === 'string' && transcriptParams.length >= MIN_TRANSCRIPT_PARAM_LENGTH) {
+        storeTranscriptParams(videoId, transcriptParams);
+        if (transcriptSource) {
+          console.log('[Background] Cached transcript params', { videoId, source: transcriptSource, length: transcriptLength });
+        }
+      }
+      if (typeof channelId === 'string' && channelId.length) {
+        youtubeChannelCache.set(videoId, channelId);
+      }
+    }
+    sendResponse({ status: 'ok' });
+    return false;
+  }
   
   // Handle YouTube summary abort request
   if (message.action === 'ABORT_YOUTUBE_SUMMARY') {
@@ -1883,3 +2215,88 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 });
+const directCaptionLanguages = ['en', 'en-US', 'en-GB', 'en-CA'];
+async function fetchYouTubeCaptionsDirect(videoId) {
+  const endpoints = [];
+  const base = `https://www.youtube.com/api/timedtext?v=${videoId}`;
+  for (const lang of directCaptionLanguages) {
+    const langBase = `${base}&lang=${lang}`;
+    endpoints.push(`${langBase}&fmt=json3`);
+    endpoints.push(`${langBase}&fmt=json3&kind=asr`);
+    endpoints.push(`${langBase}&fmt=srv3`);
+    endpoints.push(`${langBase}&fmt=srv3&kind=asr`);
+    endpoints.push(`${langBase}&kind=asr`);
+  }
+  endpoints.push(`${base}&lang=en`);
+  endpoints.push(`${base}&lang=en&kind=asr`);
+  endpoints.push(base);
+  endpoints.push(`${base}&kind=asr`);
+
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetch(endpoint);
+      if (!response.ok) {
+        console.log('[YouTube] Direct caption fetch HTTP error', response.status, 'for', endpoint);
+        continue;
+      }
+      const data = await response.text();
+      if (!data || data.length < 20) {
+        continue;
+      }
+      const captions = parseCaptionData(data);
+      if (Array.isArray(captions) && captions.length) {
+        return {
+          success: true,
+          captions,
+          raw: data,
+          endpoint
+        };
+      }
+    } catch (error) {
+      console.warn('[YouTube] Direct caption fetch error for endpoint', endpoint, error?.message || error);
+    }
+  }
+
+  return { success: false };
+}
+
+function parseTranscriptResponse(json) {
+  if (!json) return null;
+  const actions = Array.isArray(json.actions) ? json.actions : Array.isArray(json?.responseContext?.actions) ? json.responseContext.actions : null;
+  if (!Array.isArray(actions)) {
+    return null;
+  }
+  const cues = [];
+  for (const action of actions) {
+    const transcript = action?.updateTranscriptAction?.transcript;
+    const cueGroups = transcript?.body?.transcriptBodyRenderer?.cueGroups;
+    if (!Array.isArray(cueGroups)) continue;
+    for (const group of cueGroups) {
+      const cueGroup = group?.transcriptCueGroupRenderer;
+      if (!cueGroup || !Array.isArray(cueGroup.cues)) continue;
+      for (const cueEntry of cueGroup.cues) {
+        const cueRenderer = cueEntry?.transcriptCueRenderer;
+        if (!cueRenderer) continue;
+        const startMs = parseInt(cueRenderer.startOffsetMs, 10) || 0;
+        const durationMs = parseInt(cueRenderer.durationMs, 10) || 0;
+        const cueData = cueRenderer.cue;
+        if (!cueData) continue;
+        let text = '';
+        if (typeof cueData.simpleText === 'string') {
+          text = cueData.simpleText;
+        } else if (Array.isArray(cueData.runs)) {
+          text = cueData.runs.map(run => run?.text || '').join('');
+        }
+        text = (text || '').trim();
+        if (text) {
+          cues.push({
+            start: startMs / 1000,
+            duration: durationMs / 1000,
+            text
+          });
+        }
+      }
+    }
+  }
+  return cues.length ? cues : null;
+}

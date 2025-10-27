@@ -37,15 +37,52 @@
   // Content scripts can't directly access page context variables
   
   const pendingCaptionRequests = new Map(); // requestId -> {resolve, reject}
+  const pendingPrefetchRequests = new Map(); // requestId -> {resolve, reject}
   let requestIdCounter = 0;
+  let prefetchRequestIdCounter = 0;
   
   // Listen for responses from page context
   window.addEventListener('message', (event) => {
     // Only accept messages from same origin
     if (event.source !== window) return;
     
+    if (event.data.type === 'YT_METADATA_UPDATE') {
+      const { videoId, channelId, transcriptParams, transcriptSource, transcriptLength } = event.data;
+      if (videoId) {
+        try {
+          chrome.runtime.sendMessage({
+            action: 'CACHE_YT_METADATA',
+            videoId,
+            channelId: channelId || null,
+            transcriptParams: transcriptParams || null,
+            transcriptSource: transcriptSource || null,
+            transcriptLength: transcriptLength || 0
+          });
+        } catch (error) {
+          // ignore errors (e.g. no listeners yet)
+        }
+      }
+      return;
+    }
+
+    if (event.data.type === 'YT_PREFETCH_RESPONSE') {
+      const { requestId, success, source, length, error, videoId } = event.data;
+      const pending = pendingPrefetchRequests.get(requestId);
+      if (pending) {
+        pendingPrefetchRequests.delete(requestId);
+        if (success) {
+          console.log('[YouTube Bridge] Prefetch success for', videoId, { source, length });
+          pending.resolve({ success: true, source: source || null, length: length || 0 });
+        } else {
+          console.warn('[YouTube Bridge] Prefetch failed for', videoId, error);
+          pending.reject(new Error(error || 'PREFETCH_FAILED'));
+        }
+      }
+      return;
+    }
+
     if (event.data.type === 'YT_CAPTIONS_RESPONSE') {
-      const { requestId, success, data, videoId } = event.data;
+      const { requestId, success, data, videoId, error } = event.data;
       const pending = pendingCaptionRequests.get(requestId);
       
       if (pending) {
@@ -54,24 +91,24 @@
           console.log('[YouTube Bridge] Received captions for:', videoId);
           pending.resolve(data);
         } else {
-          console.warn('[YouTube Bridge] No captions for:', videoId);
-          pending.reject(new Error('NO_CAPTIONS'));
+          const message = error || 'NO_CAPTIONS';
+          console.warn('[YouTube Bridge] Caption request failed for:', videoId, message);
+          pending.reject(new Error(message));
         }
       }
     }
   });
   
-  // Function to request captions from page context
-  function getCaptionsFromPage(videoId) {
+  function postCaptionRequest(videoId, messageType) {
     return new Promise((resolve, reject) => {
       const requestId = ++requestIdCounter;
       pendingCaptionRequests.set(requestId, { resolve, reject });
       
       // Send request to page context
       window.postMessage({
-        type: 'YT_GET_CAPTIONS',
-        requestId: requestId,
-        videoId: videoId
+        type: messageType,
+        requestId,
+        videoId
       }, '*');
       
       // Timeout after 1 second
@@ -80,8 +117,49 @@
           pendingCaptionRequests.delete(requestId);
           reject(new Error('TIMEOUT'));
         }
-      }, 1000);
+      }, 1500);
     });
+  }
+
+  function postPrefetchRequest(videoId) {
+    return new Promise((resolve, reject) => {
+      const requestId = ++prefetchRequestIdCounter;
+      pendingPrefetchRequests.set(requestId, { resolve, reject });
+
+      window.postMessage({
+        type: 'YT_PREFETCH_TRANSCRIPT',
+        requestId,
+        videoId
+      }, '*');
+
+      setTimeout(() => {
+        if (pendingPrefetchRequests.has(requestId)) {
+          pendingPrefetchRequests.delete(requestId);
+          reject(new Error('TIMEOUT'));
+        }
+      }, 2500);
+    });
+  }
+
+  // Function to request captions from page context
+  async function getCaptionsFromPage(videoId) {
+    try {
+      const cached = await postCaptionRequest(videoId, 'YT_GET_CAPTIONS');
+      if (cached) {
+        return cached;
+      }
+    } catch (error) {
+      if (error && !/NO_CAPTIONS|TIMEOUT/.test(error.message || '')) {
+        throw error;
+      }
+    }
+    
+    try {
+      const fetched = await postCaptionRequest(videoId, 'YT_FETCH_PLAYER_CAPTIONS');
+      return fetched;
+    } catch (error) {
+      throw error;
+    }
   }
   
   // Expose function for content.js
@@ -99,6 +177,14 @@
       return captions !== null;
     } catch (error) {
       return false;
+    }
+  };
+
+  window.prefetchYouTubeTranscript = async function(videoId) {
+    try {
+      return await postPrefetchRequest(videoId);
+    } catch (error) {
+      return { success: false, error: error?.message || 'PREFETCH_FAILED' };
     }
   };
   
@@ -128,9 +214,22 @@
         });
       
       return true; // Async response
+      return true; // Async response
+    }
+
+    if (message.action === 'PREFETCH_YOUTUBE_TRANSCRIPT') {
+      const videoId = message.videoId;
+      console.log('[YouTube Bridge] Prefetch request for:', videoId);
+      postPrefetchRequest(videoId)
+        .then(result => {
+          sendResponse(Object.assign({ videoId }, result));
+        })
+        .catch(error => {
+          sendResponse({ success: false, error: error?.message || 'PREFETCH_FAILED', videoId });
+        });
+      return true;
     }
   });
   
   console.log('[YouTube Bridge] Ready!');
 })();
-
