@@ -158,20 +158,92 @@ const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
 const TWITTER_THREAD_TTL = 5 * 60 * 1000; // 5 minutes
 const YOUTUBE_DEBUG_LOG_FULL_INPUT = true; // Toggle to emit full summarization input for debugging
 
-let currentAbortController = null;
-let isProcessingSummary = false;
-let lastProcessedUrl = null;
+const summarizationJobs = new Map();
+const youtubeJobsByVideoId = new Map();
+let summarizationJobCounter = 0;
+let activePageJobId = null;
+let activeYouTubeJobId = null;
 
-// YouTube-specific abort controller
-let currentYouTubeAbortController = null;
-let currentYouTubeVideoId = null;
+function createSummarizationJob({ url, tabId, feature, metadata }) {
+  const controller = new AbortController();
+  const jobId = `job-${Date.now()}-${++summarizationJobCounter}`;
+  const job = {
+    id: jobId,
+    url,
+    tabId: typeof tabId === 'number' ? tabId : null,
+    feature,
+    metadata: metadata || {},
+    controller,
+    signal: controller.signal,
+    session: null,
+    sessionType: null,
+    createdAt: Date.now()
+  };
+  summarizationJobs.set(jobId, job);
+  return job;
+}
 
-// Session tracking for proper cleanup
-let currentSummarizerSession = null;
-let currentPromptSession = null;
+function registerJobSession(job, session, type) {
+  if (!job) return;
+  job.session = session || null;
+  job.sessionType = type || null;
+}
 
-// Alternative approach: Simple global video ID tracking for streaming
-let currentStreamingVideoId = null;
+function destroyJobSession(job) {
+  if (!job || !job.session) {
+    job.session = null;
+    job.sessionType = null;
+    return;
+  }
+  if (typeof job.session.destroy === 'function') {
+    try {
+      job.session.destroy();
+    } catch (error) {
+      console.warn('[Background] Failed to destroy session:', error);
+    }
+  }
+  job.session = null;
+  job.sessionType = null;
+}
+
+function finalizeJob(jobId) {
+  const job = summarizationJobs.get(jobId);
+  if (!job) return;
+  destroyJobSession(job);
+  summarizationJobs.delete(jobId);
+
+  if (job.feature === 'page' && activePageJobId === jobId) {
+    activePageJobId = null;
+  }
+
+  if (job.feature === 'youtube') {
+    if (activeYouTubeJobId === jobId) {
+      activeYouTubeJobId = null;
+    }
+    const videoId = job.metadata && job.metadata.videoId;
+    if (videoId && youtubeJobsByVideoId.get(videoId) === jobId) {
+      youtubeJobsByVideoId.delete(videoId);
+    }
+  }
+}
+
+function abortJob(jobId, reason) {
+  const job = summarizationJobs.get(jobId);
+  if (!job) return;
+  if (!job.signal.aborted) {
+    job.controller.abort();
+  }
+  console.log('[Background] Aborting job', {
+    feature: job.feature,
+    url: job.url,
+    reason: reason || 'unspecified'
+  });
+  finalizeJob(jobId);
+}
+
+function getJob(jobId) {
+  return summarizationJobs.get(jobId) || null;
+}
 
 // Clean cache periodically
 setInterval(() => {
@@ -198,16 +270,20 @@ setInterval(() => {
 // AI SUMMARIZATION FUNCTIONS
 // ========================================
 
-async function summarizeContent(text, signal, url) {
+async function summarizeContent({ job, text, url }) {
+  if (!job) {
+    throw new Error('Summarization job context missing');
+  }
+  const signal = job.signal;
   await apiInitializationPromise;
   if (settings.apiChoice === 'summarization') {
-    return await useSummarizationAPI(text, signal, url);
+    return await useSummarizationAPI({ job, text, signal, url });
   } else {
-    return await usePromptAPI(text, signal, url);
+    return await usePromptAPI({ job, text, signal, url });
   }
 }
 
-async function useSummarizationAPI(text, signal, url) {
+async function useSummarizationAPI({ job, text, signal, url }) {
   if (!SummarizerAPI.summarizer.available) {
     throw new Error('Summarizer API not available');
   }
@@ -235,30 +311,15 @@ async function useSummarizationAPI(text, signal, url) {
       outputLanguage: 'en'
     };
     
-    // Destroy any existing summarizer session
-    if (currentSummarizerSession) {
-      try {
-        if (currentSummarizerSession.destroy) {
-          console.log('[Background] Destroying old summarizer session');
-          currentSummarizerSession.destroy();
-        }
-      } catch (e) {
-        console.log('[Background] Error destroying old summarizer:', e);
-      }
-      currentSummarizerSession = null;
-    }
-    
     const summarizer = await SummarizerAPI.summarizer.create(options);
+    registerJobSession(job, summarizer, 'summarizer');
     
     // Add abort listener to destroy session
     if (signal) {
       signal.addEventListener('abort', () => {
         console.log('[Background] Abort signal received - destroying summarizer');
-        if (summarizer && summarizer.destroy) {
-          summarizer.destroy();
-        }
-        currentSummarizerSession = null;
-      });
+        destroyJobSession(job);
+      }, { once: true });
     }
     
     // Prepare text
@@ -280,13 +341,12 @@ async function useSummarizationAPI(text, signal, url) {
     console.log('[Background] Starting Summarizer streaming...');
     
     // Store the summarizer instance globally BEFORE streaming
-    currentSummarizerSession = summarizer;
+    registerJobSession(job, summarizer, 'summarizer');
     
     // Check if already aborted before starting
     if (signal && signal.aborted) {
       console.log('[Background] Already aborted before streaming started');
-      summarizer.destroy();
-      currentSummarizerSession = null;
+      destroyJobSession(job);
       throw new DOMException('Aborted', 'AbortError');
     }
     
@@ -298,21 +358,21 @@ async function useSummarizationAPI(text, signal, url) {
       const BROADCAST_INTERVAL = 150;
       
       // Store the videoId for this specific stream at the start
-      const videoIdForThisStream = url.includes('watch?v=') ? new URL(url).searchParams.get('v') : null;
-      console.log('[Streaming] Starting stream for videoId:', videoIdForThisStream);
+      const videoIdForThisStream = job?.metadata?.videoId ||
+        (url.includes('watch?v=') ? new URL(url).searchParams.get('v') : null);
+      if (videoIdForThisStream) {
+        console.log('[Streaming] Starting stream for videoId:', videoIdForThisStream);
+      }
       
       for await (const chunk of stream) {
         // Add debug line - log every ~100 chars
         if (fullSummary.length % 100 < 10) {
-          console.log(`[Streaming] Progress: ${fullSummary.length} chars, thisVideo: ${videoIdForThisStream}, currentVideo: ${currentStreamingVideoId}`);
+          console.log(`[Streaming] Progress: ${fullSummary.length} chars, videoId: ${videoIdForThisStream || 'n/a'}`);
         }
         
-        // ✅ ALTERNATIVE APPROACH: Check if we're still processing the same video
-        if (videoIdForThisStream && currentStreamingVideoId && currentStreamingVideoId !== videoIdForThisStream) {
-          console.log('[Background] 🔴 VIDEO CHANGED - stopping stream');
-          console.log(`  This stream is for: ${videoIdForThisStream}, but now processing: ${currentStreamingVideoId}`);
-          summarizer.destroy();
-          currentSummarizerSession = null;
+        if (!summarizationJobs.has(job.id)) {
+          console.log('[Background] 🔴 JOB REMOVED - stopping stream');
+          destroyJobSession(job);
           throw new DOMException('Aborted', 'AbortError');
         }
         
@@ -321,19 +381,14 @@ async function useSummarizationAPI(text, signal, url) {
           console.log('[Background] 🔴 ABORT SIGNAL DETECTED - stopping immediately');
           
           // Destroy session immediately
-          try {
-            summarizer.destroy();
-          } catch (e) {
-            console.log('[Background] Error destroying during abort:', e);
-          }
-          currentSummarizerSession = null;
+          destroyJobSession(job);
           
           // Throw to exit the async generator
           throw new DOMException('Aborted', 'AbortError');
         }
         
         // ✅ ENHANCED: Also check if session was destroyed externally
-        if (!currentSummarizerSession) {
+        if (!job.session) {
           console.log('[Background] 🔴 SESSION DESTROYED - stopping stream');
           throw new DOMException('Session destroyed', 'AbortError');
         }
@@ -342,40 +397,35 @@ async function useSummarizationAPI(text, signal, url) {
         
         const now = Date.now();
         if (now - lastBroadcast >= BROADCAST_INTERVAL) {
-          broadcastStreamingUpdate(fullSummary, url);
+          broadcastStreamingUpdate(job, fullSummary);
           lastBroadcast = now;
         }
       }
       
       // Final broadcast
-      broadcastStreamingUpdate(fullSummary, url);
+      broadcastStreamingUpdate(job, fullSummary);
       
       return fullSummary;
       
     } catch (error) {
       // Clean up on any error
-      if (currentSummarizerSession) {
-        try {
-          currentSummarizerSession.destroy();
-        } catch (e) {}
-        currentSummarizerSession = null;
-      }
+      destroyJobSession(job);
       throw error;
     }
     
   } catch (error) {
     if (error.name === 'AbortError' || error.message === 'Session is destroyed') {
       console.log('[Background] Summarizer aborted/destroyed');
-      currentSummarizerSession = null;
       throw error;
     }
     console.error('[Background] Summarization failed:', error);
-    currentSummarizerSession = null;
     throw error;
+  } finally {
+    destroyJobSession(job);
   }
 }
 
-async function usePromptAPI(text, signal, url) {
+async function usePromptAPI({ job, text, signal, url }) {
   if (!SummarizerAPI.promptAPI.available) {
     throw new Error('Prompt API not available');
   }
@@ -396,32 +446,20 @@ async function usePromptAPI(text, signal, url) {
   
   try {
     // Destroy any existing prompt session
-    if (currentPromptSession) {
-      try {
-        console.log('[Background] Destroying old prompt session');
-        currentPromptSession.destroy();
-      } catch (e) {
-        console.log('[Background] Error destroying old prompt session:', e);
-      }
-      currentPromptSession = null;
-    }
-    
     const session = await SummarizerAPI.promptAPI.create({
       expectedOutputs: [
         { type: 'text', languages: ['en'] }
       ],
       signal: signal  // Pass signal directly to create
     });
+    registerJobSession(job, session, 'prompt');
     
     // Add abort listener to destroy session
     if (signal) {
       signal.addEventListener('abort', () => {
         console.log('[Background] Abort signal received - destroying prompt session');
-        if (session) {
-          session.destroy();
-        }
-        currentPromptSession = null;
-      });
+        destroyJobSession(job);
+      }, { once: true });
     }
     
     // Prepare text
@@ -445,13 +483,12 @@ async function usePromptAPI(text, signal, url) {
     console.log('[Background] Starting Prompt API streaming...');
     
     // Store the session instance globally BEFORE streaming
-    currentPromptSession = session;
+    registerJobSession(job, session, 'prompt');
     
     // Check if already aborted before starting
     if (signal && signal.aborted) {
       console.log('[Background] Already aborted before streaming started');
-      session.destroy();
-      currentPromptSession = null;
+      destroyJobSession(job);
       throw new DOMException('Aborted', 'AbortError');
     }
     
@@ -463,21 +500,21 @@ async function usePromptAPI(text, signal, url) {
       const BROADCAST_INTERVAL = 150;
       
       // Store the videoId for this specific stream at the start
-      const videoIdForThisStream = url.includes('watch?v=') ? new URL(url).searchParams.get('v') : null;
-      console.log('[Streaming] Starting stream for videoId:', videoIdForThisStream);
+      const videoIdForThisStream = job?.metadata?.videoId ||
+        (url.includes('watch?v=') ? new URL(url).searchParams.get('v') : null);
+      if (videoIdForThisStream) {
+        console.log('[Streaming] Starting stream for videoId:', videoIdForThisStream);
+      }
       
       for await (const chunk of stream) {
         // Add debug line - log every ~100 chars
         if (fullSummary.length % 100 < 10) {
-          console.log(`[Streaming] Progress: ${fullSummary.length} chars, thisVideo: ${videoIdForThisStream}, currentVideo: ${currentStreamingVideoId}`);
+          console.log(`[Streaming] Progress: ${fullSummary.length} chars, videoId: ${videoIdForThisStream || 'n/a'}`);
         }
         
-        // ✅ ALTERNATIVE APPROACH: Check if we're still processing the same video
-        if (videoIdForThisStream && currentStreamingVideoId && currentStreamingVideoId !== videoIdForThisStream) {
-          console.log('[Background] 🔴 VIDEO CHANGED - stopping stream');
-          console.log(`  This stream is for: ${videoIdForThisStream}, but now processing: ${currentStreamingVideoId}`);
-          session.destroy();
-          currentPromptSession = null;
+        if (!summarizationJobs.has(job.id)) {
+          console.log('[Background] 🔴 JOB REMOVED - stopping stream');
+          destroyJobSession(job);
           throw new DOMException('Aborted', 'AbortError');
         }
         
@@ -486,19 +523,14 @@ async function usePromptAPI(text, signal, url) {
           console.log('[Background] 🔴 ABORT SIGNAL DETECTED - stopping immediately');
           
           // Destroy session immediately
-          try {
-            session.destroy();
-          } catch (e) {
-            console.log('[Background] Error destroying during abort:', e);
-          }
-          currentPromptSession = null;
+          destroyJobSession(job);
           
           // Throw to exit the async generator
           throw new DOMException('Aborted', 'AbortError');
         }
         
         // ✅ ENHANCED: Also check if session was destroyed externally
-        if (!currentPromptSession) {
+        if (!job.session) {
           console.log('[Background] 🔴 SESSION DESTROYED - stopping stream');
           throw new DOMException('Session destroyed', 'AbortError');
         }
@@ -507,64 +539,66 @@ async function usePromptAPI(text, signal, url) {
         
         const now = Date.now();
         if (now - lastBroadcast >= BROADCAST_INTERVAL) {
-          broadcastStreamingUpdate(fullSummary, url);
+          broadcastStreamingUpdate(job, fullSummary);
           lastBroadcast = now;
         }
       }
       
       // Final broadcast
-      broadcastStreamingUpdate(fullSummary, url);
+      broadcastStreamingUpdate(job, fullSummary);
       
       return fullSummary;
       
     } catch (error) {
       // Clean up on any error
-      if (currentPromptSession) {
-        try {
-          currentPromptSession.destroy();
-        } catch (e) {}
-        currentPromptSession = null;
-      }
+      destroyJobSession(job);
       throw error;
     }
     
   } catch (error) {
     if (error.name === 'AbortError' || error.message === 'Session is destroyed') {
       console.log('[Background] Prompt API aborted/destroyed');
-      currentPromptSession = null;
       throw error;
     }
     console.error('[Background] Prompt API failed:', error);
-    currentPromptSession = null;
     throw error;
+  } finally {
+    destroyJobSession(job);
   }
 }
 
 // Broadcast streaming updates to all display surfaces
-function broadcastStreamingUpdate(partialSummary, url) {
+function broadcastStreamingUpdate(job, partialSummary) {
+  if (!job) return;
+  if (!summarizationJobs.has(job.id)) {
+    return;
+  }
   const formatted = formatAISummary(partialSummary);
-  
-  // Send to side panel if open
-  chrome.runtime.sendMessage({
+  const payload = {
     type: 'STREAMING_UPDATE',
     content: formatted,
-    url: url
-  }).catch(() => {
+    url: job.url
+  };
+  
+  // Send to side panel if open
+  chrome.runtime.sendMessage(payload).catch(() => {
     // Side panel not open, ignore
   });
   
   // Send to content script for tooltip
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    if (tabs[0]) {
-      chrome.tabs.sendMessage(tabs[0].id, {
-        type: 'STREAMING_UPDATE',
-        content: formatted,
-        url: url
-      }).catch(() => {
-        // Content script not ready, ignore
-      });
-    }
-  });
+  if (typeof job.tabId === 'number') {
+    chrome.tabs.sendMessage(job.tabId, payload).catch(() => {
+      // Content script not ready, ignore
+    });
+  } else {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0]) {
+        chrome.tabs.sendMessage(tabs[0].id, payload).catch(() => {
+          // Content script not ready, ignore
+        });
+      }
+    });
+  }
 }
 
 // Format AI summary to HTML
@@ -863,21 +897,20 @@ async function handleTwitterBackgroundScrape(message) {
 // Handle content summarization
 async function handleSummarizeContent(message, sender) {
   const { url, title, textContent, html } = message;
+  const tabId = sender?.tab?.id ?? null;
   
   console.log('[Background] Summarize request for:', url);
   
-  // Check if same URL is already being processed
-  if (isProcessingSummary && lastProcessedUrl === url) {
+  const existingPageJob = getJob(activePageJobId);
+  
+  if (existingPageJob && existingPageJob.url === url) {
     console.log('[Background] Already processing this URL, ignoring duplicate');
     return { status: 'duplicate' };
   }
   
-  // Cancel previous processing if different URL
-  if (currentAbortController && lastProcessedUrl !== url) {
+  if (existingPageJob && existingPageJob.url !== url) {
     console.log('[Background] Canceling previous processing for different URL');
-    currentAbortController.abort();
-    currentAbortController = null;
-    isProcessingSummary = false;
+    abortJob(existingPageJob.id, 'replaced_by_new_page_request');
   }
   
   // Check cache
@@ -894,20 +927,21 @@ async function handleSummarizeContent(message, sender) {
     };
   }
   
-  // Start processing
-  currentAbortController = new AbortController();
-  const signal = currentAbortController.signal;
-  isProcessingSummary = true;
-  lastProcessedUrl = url;
+  const job = createSummarizationJob({
+    url,
+    tabId,
+    feature: 'page'
+  });
+  activePageJobId = job.id;
   
   // Notify displays that processing started
-  broadcastProcessingStatus('started', title);
+  broadcastProcessingStatus('started', title, job);
   
   try {
-    const summary = await summarizeContent(textContent, signal, url);
+    const summary = await summarizeContent({ job, text: textContent, url });
     
     // Check if aborted
-    if (signal.aborted) {
+    if (job.signal.aborted) {
       console.log('[Background] Processing was aborted');
       return { status: 'aborted' };
     }
@@ -920,9 +954,6 @@ async function handleSummarizeContent(message, sender) {
     
     console.log('[Background] Summarization complete and cached');
     
-    isProcessingSummary = false;
-    currentAbortController = null;
-    
     return {
       status: 'complete',
       title: title,
@@ -931,35 +962,40 @@ async function handleSummarizeContent(message, sender) {
     };
     
   } catch (error) {
-    isProcessingSummary = false;
-    currentAbortController = null;
-    
     if (error.name === 'AbortError') {
+      console.log('[Background] Summarization aborted for URL:', url);
       return { status: 'aborted' };
     }
     
     console.error('[Background] Summarization error:', error);
     return { status: 'error', error: error.message };
+  } finally {
+    finalizeJob(job.id);
   }
 }
 
 // Broadcast processing status
-function broadcastProcessingStatus(status, title) {
+function broadcastProcessingStatus(status, title, job) {
   const message = {
     type: 'PROCESSING_STATUS',
     status: status,
-    title: title
+    title: title,
+    url: job ? job.url : null
   };
   
   // To side panel
   chrome.runtime.sendMessage(message).catch(() => {});
   
   // To content script
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    if (tabs[0]) {
-      chrome.tabs.sendMessage(tabs[0].id, message).catch(() => {});
-    }
-  });
+  if (job && typeof job.tabId === 'number') {
+    chrome.tabs.sendMessage(job.tabId, message).catch(() => {});
+  } else {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0]) {
+        chrome.tabs.sendMessage(tabs[0].id, message).catch(() => {});
+      }
+    });
+  }
 }
 
 // ========================================
@@ -1428,41 +1464,22 @@ function clipTranscript(text, limit) {
 async function handleYouTubeSummary(videoId, url, tabId) {
   console.log('[YouTube] Handling summary request for:', videoId);
   
-  // CRITICAL: Abort any previous processing FIRST
-  if (currentYouTubeAbortController && currentYouTubeVideoId !== videoId) {
-    console.log('[YouTube] ABORTING previous video:', currentYouTubeVideoId);
-    currentYouTubeAbortController.abort();
-    
-    // Destroy sessions immediately
-    if (currentSummarizerSession) {
-      try {
-        currentSummarizerSession.destroy();
-        console.log('[YouTube] Destroyed previous summarizer session');
-      } catch (e) {}
-      currentSummarizerSession = null;
-    }
-    if (currentPromptSession) {
-      try {
-        currentPromptSession.destroy();
-        console.log('[YouTube] Destroyed previous prompt session');
-      } catch (e) {}
-      currentPromptSession = null;
-    }
+  const existingJobId = youtubeJobsByVideoId.get(videoId);
+  const existingJob = existingJobId ? getJob(existingJobId) : null;
+  if (existingJob) {
+    console.log('[YouTube] Summary already in progress for:', videoId);
+    return { status: 'streaming', videoId };
+  }
+  if (existingJobId && !existingJob) {
+    youtubeJobsByVideoId.delete(videoId);
   }
   
-  // Create NEW abort controller for this video
-  currentYouTubeAbortController = new AbortController();
-  currentYouTubeVideoId = videoId;
-  lastProcessedUrl = url;
-  const signal = currentYouTubeAbortController.signal;
+  const activeJob = getJob(activeYouTubeJobId);
+  if (activeJob && activeJob.metadata && activeJob.metadata.videoId && activeJob.metadata.videoId !== videoId) {
+    console.log('[YouTube] Aborting previous video:', activeJob.metadata.videoId);
+    abortJob(activeJob.id, 'youtube_video_switch');
+  }
   
-  // ALTERNATIVE APPROACH: Set global streaming video ID BEFORE starting stream
-  currentStreamingVideoId = videoId;
-  
-  console.log('[YouTube] Created new abort controller for:', videoId);
-  console.log('[YouTube] Set currentStreamingVideoId to:', videoId);
-  
-  // Check summary cache first
   const cachedSummary = youtubeSummaryCache.get(videoId);
   if (cachedSummary && (Date.now() - cachedSummary.timestamp) < CACHE_DURATION) {
     console.log('[YouTube] Returning cached summary');
@@ -1474,191 +1491,190 @@ async function handleYouTubeSummary(videoId, url, tabId) {
     };
   }
   
-  // Check if captions are cached
-  let captionData = youtubeCaptionCache.get(videoId);
-  let descriptionData = youtubeDescriptionCache.get(videoId);
+  const job = createSummarizationJob({
+    url,
+    tabId,
+    feature: 'youtube',
+    metadata: { videoId }
+  });
+  activeYouTubeJobId = job.id;
+  youtubeJobsByVideoId.set(videoId, job.id);
+  const signal = job.signal;
   
-  if (!descriptionData) {
-    descriptionData = await fetchYouTubeDescription(videoId, url).catch((error) => {
-      console.warn('[YouTube] Description fetch failed:', error?.message || error);
-      return null;
-    });
-    if (descriptionData) {
-      youtubeDescriptionCache.set(videoId, {
-        description: descriptionData,
-        timestamp: Date.now()
+  try {
+    // Check if captions are cached
+    let captionData = youtubeCaptionCache.get(videoId);
+    let descriptionData = youtubeDescriptionCache.get(videoId);
+    
+    if (!descriptionData) {
+      descriptionData = await fetchYouTubeDescription(videoId, url).catch((error) => {
+        console.warn('[YouTube] Description fetch failed:', error?.message || error);
+        return null;
       });
-    }
-  } else {
-    descriptionData = descriptionData.description;
-  }
-  
-  if (!captionData) {
-    console.log('[YouTube] Captions not in cache, requesting from bridge...');
-    
-    let targetTabId = tabId;
-    if (!targetTabId) {
-      const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      if (!tabs[0]) {
-        throw new Error('No active tab found');
-      }
-      targetTabId = tabs[0].id;
-    }
-    
-    // Poll the bridge a few times in case captions are still loading
-    const MAX_ATTEMPTS = 6;
-    const RETRY_DELAY_MS = 500;
-    
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS && !captionData; attempt++) {
-      if (currentYouTubeAbortController?.signal?.aborted) {
-        throw new DOMException('Aborted', 'AbortError');
-      }
-      
-      try {
-        const response = await chrome.tabs.sendMessage(targetTabId, {
-          action: 'GET_YOUTUBE_CAPTIONS',
-          videoId: videoId
+      if (descriptionData) {
+        youtubeDescriptionCache.set(videoId, {
+          description: descriptionData,
+          timestamp: Date.now()
         });
-        
-        if (response && response.success && response.data) {
-          captionData = response.data;
-          youtubeCaptionCache.set(videoId, {
-            data: captionData,
-            timestamp: captionData.timestamp || Date.now()
-          });
-          console.log('[YouTube] Captions received on attempt', attempt);
-          break;
-        }
-        
-        const error = response?.error || 'UNKNOWN_ERROR';
-        console.log('[YouTube] Caption attempt', attempt, 'failed:', error);
-        
-        if (error !== 'NO_CAPTIONS' && error !== 'TIMEOUT') {
-          throw new Error(error);
-        }
-      } catch (error) {
-        if (error && error.message === 'NO_CAPTIONS') {
-          console.log('[YouTube] Caption attempt', attempt, 'reported no captions yet.');
-        } else if (error && error.message === 'No tab with id') {
-          throw new Error('YouTube tab no longer available');
-        } else {
-          console.error('[YouTube] Error getting captions:', error);
-          if (attempt === MAX_ATTEMPTS && !descriptionData) {
-            return {
-              status: 'error',
-              error: 'NO_CAPTIONS',
-              message: 'Could not retrieve captions for this video'
-            };
-          }
-        }
       }
-      
-      if (!captionData && attempt < MAX_ATTEMPTS) {
-        await delay(RETRY_DELAY_MS);
-      }
+    } else {
+      descriptionData = descriptionData.description;
     }
     
     if (!captionData) {
-      console.warn('[YouTube] Failed to retrieve captions after retries');
-      if (!descriptionData) {
-        return {
-          status: 'error',
-          error: 'NO_CAPTIONS',
-          message: 'Could not retrieve captions for this video'
-        };
+      console.log('[YouTube] Captions not in cache, requesting from bridge...');
+      
+      let targetTabId = tabId;
+      if (!targetTabId) {
+        const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        if (!tabs[0]) {
+          throw new Error('No active tab found');
+        }
+        targetTabId = tabs[0].id;
       }
+      
+      const MAX_ATTEMPTS = 6;
+      const RETRY_DELAY_MS = 500;
+      
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS && !captionData; attempt++) {
+        if (signal.aborted || !summarizationJobs.has(job.id)) {
+          throw new DOMException('Aborted', 'AbortError');
+        }
+        
+        try {
+          const response = await chrome.tabs.sendMessage(targetTabId, {
+            action: 'GET_YOUTUBE_CAPTIONS',
+            videoId: videoId
+          });
+          
+          if (response && response.success && response.data) {
+            captionData = response.data;
+            youtubeCaptionCache.set(videoId, {
+              data: captionData,
+              timestamp: captionData.timestamp || Date.now()
+            });
+            console.log('[YouTube] Captions received on attempt', attempt);
+            break;
+          }
+          
+          const error = response?.error || 'UNKNOWN_ERROR';
+          console.log('[YouTube] Caption attempt', attempt, 'failed:', error);
+          
+          if (error !== 'NO_CAPTIONS' && error !== 'TIMEOUT') {
+            throw new Error(error);
+          }
+        } catch (error) {
+          if (error && error.message === 'NO_CAPTIONS') {
+            console.log('[YouTube] Caption attempt', attempt, 'reported no captions yet.');
+          } else if (error && error.message === 'No tab with id') {
+            throw new Error('YouTube tab no longer available');
+          } else {
+            console.error('[YouTube] Error getting captions:', error);
+            if (attempt === MAX_ATTEMPTS && !descriptionData) {
+              return {
+                status: 'error',
+                error: 'NO_CAPTIONS',
+                message: 'Could not retrieve captions for this video'
+              };
+            }
+          }
+        }
+        
+        if (!captionData && attempt < MAX_ATTEMPTS) {
+          await delay(RETRY_DELAY_MS);
+        }
+      }
+      
+      if (!captionData) {
+        console.warn('[YouTube] Failed to retrieve captions after retries');
+        if (!descriptionData) {
+          return {
+            status: 'error',
+            error: 'NO_CAPTIONS',
+            message: 'Could not retrieve captions for this video'
+          };
+        }
+      }
+    } else {
+      console.log('[YouTube] Using cached caption data');
+      captionData = captionData.data;
     }
-  } else {
-    console.log('[YouTube] Using cached caption data');
-    captionData = captionData.data;
-  }
-  
-  // The captionData is now an object: {videoId, captions, text, timestamp}
-  // Check if we have the captions array
-  const captionArray = captionData?.captions || [];
-  const captionText = captionData?.text || captionsToText(captionArray);
-  const descriptionText = descriptionData || '';
-  
-  if ((!captionText || captionText.length < 10) && (!descriptionText || descriptionText.length < 20)) {
-    return {
-      status: 'error',
-      error: 'NO_CAPTIONS',
-      message: 'No captions or description available for this video'
-    };
-  }
-  
-  console.log('[YouTube] Caption count:', captionArray.length);
-  console.log('[YouTube] Caption text length:', captionText ? captionText.length : 0);
-  console.log('[YouTube] Description length:', descriptionText ? descriptionText.length : 0);
-  
-  const { inputText: summarizationInput, metadata: summarizationMetadata } = buildYouTubeSummarizationInput({
-    captionText,
-    descriptionText,
-    videoId
-  });
-  if (!summarizationInput || summarizationInput.length < 20) {
-    return {
-      status: 'error',
-      error: 'NO_CAPTIONS',
-      message: 'Not enough content to summarize'
-    };
-  }
-  const previewSource = captionText && captionText.length ? captionText : descriptionText || '';
-  console.log('[YouTube] Summarization input preview source:', previewSource.slice(0, 120));
-  if (YOUTUBE_DEBUG_LOG_FULL_INPUT) {
-    console.log('[YouTube] Summarization full input:', summarizationInput);
-  } else {
-    console.log('[YouTube] Summarization input sample (first 500 chars):', summarizationInput.slice(0, 500));
-  }
-  console.log('[YouTube] Summarization compression metadata:', summarizationMetadata);
-  
-  // Generate summary using the same logic as webpage summarization
-  try {
-    // Use existing summarizeContent function (signal already created at top)
-    const summary = await summarizeContent(summarizationInput, signal, url);
     
-    // Cache the summary
-    youtubeSummaryCache.set(videoId, {
-      summary: summary,
-      timestamp: Date.now()
-    });
+    const captionArray = captionData?.captions || [];
+    const captionText = captionData?.text || captionsToText(captionArray);
+    const descriptionText = descriptionData || '';
     
-    console.log('[YouTube] Summary generated successfully. Length:', summary ? summary.length : 0);
-    
-    // Clear abort controller after success
-    currentYouTubeAbortController = null;
-    currentYouTubeVideoId = null;
-    
-    return {
-      status: 'complete',
-      cached: false,
-      summary: summary,
-      videoId: videoId,
-      captionCount: captionArray.length,
-      compression: summarizationMetadata,
-      debugInputSnippet: summarizationInput.slice(0, 500),
-      ...(YOUTUBE_DEBUG_LOG_FULL_INPUT ? { debugFullInput: summarizationInput } : {})
-    };
-  } catch (error) {
-    console.error('[YouTube] Error generating summary:', error);
-    
-    // Clear abort controller after error
-    currentYouTubeAbortController = null;
-    currentYouTubeVideoId = null;
-    
-    // Check if it was aborted (user switched videos)
-    if (error.name === 'AbortError') {
+    if ((!captionText || captionText.length < 10) && (!descriptionText || descriptionText.length < 20)) {
       return {
-        status: 'aborted',
-        message: 'Summary cancelled (switched to different video)'
+        status: 'error',
+        error: 'NO_CAPTIONS',
+        message: 'No captions or description available for this video'
       };
     }
     
+    console.log('[YouTube] Caption count:', captionArray.length);
+    console.log('[YouTube] Caption text length:', captionText ? captionText.length : 0);
+    console.log('[YouTube] Description length:', descriptionText ? descriptionText.length : 0);
+    
+    const { inputText: summarizationInput, metadata: summarizationMetadata } = buildYouTubeSummarizationInput({
+      captionText,
+      descriptionText,
+      videoId
+    });
+    if (!summarizationInput || summarizationInput.length < 20) {
+      return {
+        status: 'error',
+        error: 'NO_CAPTIONS',
+        message: 'Not enough content to summarize'
+      };
+    }
+    const previewSource = captionText && captionText.length ? captionText : descriptionText || '';
+    console.log('[YouTube] Summarization input preview source:', previewSource.slice(0, 120));
+    if (YOUTUBE_DEBUG_LOG_FULL_INPUT) {
+      console.log('[YouTube] Summarization full input:', summarizationInput);
+    } else {
+      console.log('[YouTube] Summarization input sample (first 500 chars):', summarizationInput.slice(0, 500));
+    }
+    console.log('[YouTube] Summarization compression metadata:', summarizationMetadata);
+    
+    try {
+      const summary = await summarizeContent({ job, text: summarizationInput, url });
+      
+      youtubeSummaryCache.set(videoId, {
+        summary: summary,
+        timestamp: Date.now()
+      });
+      
+      console.log('[YouTube] Summary generated successfully. Length:', summary ? summary.length : 0);
+      
+      return {
+        status: 'complete',
+        cached: false,
+        summary: summary,
+        videoId: videoId,
+        captionCount: captionArray.length,
+        compression: summarizationMetadata,
+        debugInputSnippet: summarizationInput.slice(0, 500),
+        ...(YOUTUBE_DEBUG_LOG_FULL_INPUT ? { debugFullInput: summarizationInput } : {})
+      };
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        return {
+          status: 'aborted',
+          message: 'Summary cancelled (switched to different video)'
+        };
+      }
+      throw error;
+    }
+  } catch (error) {
+    console.error('[YouTube] Error generating summary:', error);
     return {
       status: 'error',
       error: 'SUMMARY_FAILED',
       message: error.message
     };
+  } finally {
+    finalizeJob(job.id);
   }
 }
 
@@ -1781,47 +1797,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[Background] 🔴 ABORT MESSAGE RECEIVED!');
     console.log('[Background] Abort details:', {
       oldVideoId: message.videoId,
-      newVideoId: message.newVideoId,
-      currentYouTubeVideoId: currentYouTubeVideoId,
-      hasController: !!currentYouTubeAbortController,
-      hasSummarizerSession: !!currentSummarizerSession,
-      hasPromptSession: !!currentPromptSession
+      newVideoId: message.newVideoId
     });
     
-    // Actually abort
-    if (currentYouTubeAbortController) {
-      console.log('[Background] 🛑 CALLING ABORT on controller');
-      currentYouTubeAbortController.abort();
-      currentYouTubeAbortController = null;
+    const videoId = message.videoId;
+    let targetJobId = null;
+    
+    if (videoId && youtubeJobsByVideoId.has(videoId)) {
+      targetJobId = youtubeJobsByVideoId.get(videoId);
+    } else if (activeYouTubeJobId) {
+      targetJobId = activeYouTubeJobId;
     }
     
-    // Destroy sessions
-    if (currentSummarizerSession) {
-      console.log('[Background] 💥 DESTROYING summarizer session');
-      try {
-        currentSummarizerSession.destroy();
-      } catch (e) {
-        console.error('[Background] Error destroying summarizer:', e);
-      }
-      currentSummarizerSession = null;
+    const job = targetJobId ? getJob(targetJobId) : null;
+    
+    if (job) {
+      abortJob(job.id, 'content_abort_request');
+      sendResponse({ status: 'aborted', message: 'YouTube summary aborted' });
+    } else {
+      sendResponse({ status: 'idle', message: 'No active YouTube summary' });
     }
     
-    if (currentPromptSession) {
-      console.log('[Background] 💥 DESTROYING prompt session');
-      try {
-        currentPromptSession.destroy();
-      } catch (e) {
-        console.error('[Background] Error destroying prompt:', e);
-      }
-      currentPromptSession = null;
-    }
-    
-    // Clear video IDs
-    currentYouTubeVideoId = null;
-    lastProcessedUrl = null;
-    currentStreamingVideoId = null;  // Clear alternative approach tracking
-    
-    sendResponse({ status: 'aborted', message: 'All sessions destroyed' });
     return true; // Keep channel open
   }
   
