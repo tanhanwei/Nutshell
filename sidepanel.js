@@ -177,9 +177,9 @@ function togglePromptContainer() {
 
 // Listen for messages from background
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'STREAMING_UPDATE') {
+  if (message.type === 'stream') {
     if (settings.displayMode === 'panel' || settings.displayMode === 'both') {
-      updateSummaryDisplay(message.content);
+      updateSummaryDisplay(message.data);
     }
   }
   

@@ -201,16 +201,18 @@ setInterval(() => {
 // AI SUMMARIZATION FUNCTIONS
 // ========================================
 
-async function summarizeContent(text, signal, url) {
+async function summarizeContent(text, signal, url, options = {}) {
+  const { debugInfo = null, tabId = null, requestToken = null } = options || {};
   await apiInitializationPromise;
   if (settings.apiChoice === 'summarization') {
-    return await useSummarizationAPI(text, signal, url);
+    return await useSummarizationAPI(text, signal, url, { debugInfo, tabId, requestToken });
   } else {
-    return await usePromptAPI(text, signal, url);
+    return await usePromptAPI(text, signal, url, { debugInfo, tabId, requestToken });
   }
 }
 
-async function useSummarizationAPI(text, signal, url) {
+async function useSummarizationAPI(text, signal, url, extras = {}) {
+  const { debugInfo = null, tabId = null, requestToken = null } = extras || {};
   if (!SummarizerAPI.summarizer.available) {
     throw new Error('Summarizer API not available');
   }
@@ -280,6 +282,13 @@ async function useSummarizationAPI(text, signal, url) {
       processedText = `${start}\n\n[...]\n\n${middle}\n\n[...]\n\n${end}`;
     }
     
+    if (debugInfo) {
+      debugInfo.rawInputText = text;
+      debugInfo.processedText = processedText;
+      debugInfo.finalInputText = processedText;
+      debugInfo.totalInputLength = processedText.length;
+    }
+    
     console.log('[Background] Starting Summarizer streaming...');
     
     // Store the summarizer instance globally BEFORE streaming
@@ -294,6 +303,10 @@ async function useSummarizationAPI(text, signal, url) {
     }
     
     try {
+      if (debugInfo || requestToken !== null) {
+        broadcastStreamingStart(url, debugInfo, tabId, requestToken);
+      }
+      
       const stream = summarizer.summarizeStreaming(processedText);
       
       let fullSummary = '';
@@ -345,13 +358,14 @@ async function useSummarizationAPI(text, signal, url) {
         
         const now = Date.now();
         if (now - lastBroadcast >= BROADCAST_INTERVAL) {
-          broadcastStreamingUpdate(fullSummary, url);
+          broadcastStreamingUpdate(fullSummary, url, tabId, requestToken);
           lastBroadcast = now;
         }
       }
       
       // Final broadcast
-      broadcastStreamingUpdate(fullSummary, url);
+      broadcastStreamingUpdate(fullSummary, url, tabId, requestToken);
+      broadcastStreamingEnd('end', url, tabId, videoIdForThisStream, requestToken);
       
       return fullSummary;
       
@@ -363,6 +377,9 @@ async function useSummarizationAPI(text, signal, url) {
         } catch (e) {}
         currentSummarizerSession = null;
       }
+      const status = error.name === 'AbortError' ? 'end' : 'error';
+      broadcastStreamingEnd(status, url, tabId, videoIdForThisStream, requestToken, error?.message || null);
+      error.__streamEndNotified = true;
       throw error;
     }
     
@@ -370,15 +387,24 @@ async function useSummarizationAPI(text, signal, url) {
     if (error.name === 'AbortError' || error.message === 'Session is destroyed') {
       console.log('[Background] Summarizer aborted/destroyed');
       currentSummarizerSession = null;
+      if (!error.__streamEndNotified) {
+        broadcastStreamingEnd('end', url, tabId, currentStreamingVideoId, requestToken);
+        error.__streamEndNotified = true;
+      }
       throw error;
     }
     console.error('[Background] Summarization failed:', error);
     currentSummarizerSession = null;
+    if (!error.__streamEndNotified) {
+      broadcastStreamingEnd('error', url, tabId, currentStreamingVideoId, requestToken, error?.message || null);
+      error.__streamEndNotified = true;
+    }
     throw error;
   }
 }
 
-async function usePromptAPI(text, signal, url) {
+async function usePromptAPI(text, signal, url, extras = {}) {
+  const { debugInfo = null, tabId = null, requestToken = null } = extras || {};
   if (!SummarizerAPI.promptAPI.available) {
     throw new Error('Prompt API not available');
   }
@@ -445,6 +471,13 @@ async function usePromptAPI(text, signal, url) {
     
     const fullPrompt = `${settings.customPrompt}\n\nContent:\n${processedText}`;
     
+    if (debugInfo) {
+      debugInfo.rawInputText = text;
+      debugInfo.processedText = processedText;
+      debugInfo.finalInputText = fullPrompt;
+      debugInfo.totalInputLength = fullPrompt.length;
+    }
+    
     console.log('[Background] Starting Prompt API streaming...');
     
     // Store the session instance globally BEFORE streaming
@@ -459,6 +492,10 @@ async function usePromptAPI(text, signal, url) {
     }
     
     try {
+      if (debugInfo || requestToken !== null) {
+        broadcastStreamingStart(url, debugInfo, tabId, requestToken);
+      }
+      
       const stream = session.promptStreaming(fullPrompt);
       
       let fullSummary = '';
@@ -510,13 +547,14 @@ async function usePromptAPI(text, signal, url) {
         
         const now = Date.now();
         if (now - lastBroadcast >= BROADCAST_INTERVAL) {
-          broadcastStreamingUpdate(fullSummary, url);
+          broadcastStreamingUpdate(fullSummary, url, tabId, requestToken);
           lastBroadcast = now;
         }
       }
       
       // Final broadcast
-      broadcastStreamingUpdate(fullSummary, url);
+      broadcastStreamingUpdate(fullSummary, url, tabId, requestToken);
+      broadcastStreamingEnd('end', url, tabId, videoIdForThisStream, requestToken);
       
       return fullSummary;
       
@@ -528,6 +566,9 @@ async function usePromptAPI(text, signal, url) {
         } catch (e) {}
         currentPromptSession = null;
       }
+      const status = error.name === 'AbortError' ? 'end' : 'error';
+      broadcastStreamingEnd(status, url, tabId, videoIdForThisStream, requestToken, error?.message || null);
+      error.__streamEndNotified = true;
       throw error;
     }
     
@@ -535,16 +576,58 @@ async function usePromptAPI(text, signal, url) {
     if (error.name === 'AbortError' || error.message === 'Session is destroyed') {
       console.log('[Background] Prompt API aborted/destroyed');
       currentPromptSession = null;
+      if (!error.__streamEndNotified) {
+        broadcastStreamingEnd('end', url, tabId, currentStreamingVideoId, requestToken);
+        error.__streamEndNotified = true;
+      }
       throw error;
     }
     console.error('[Background] Prompt API failed:', error);
     currentPromptSession = null;
+    if (!error.__streamEndNotified) {
+      broadcastStreamingEnd('error', url, tabId, currentStreamingVideoId, requestToken, error?.message || null);
+      error.__streamEndNotified = true;
+    }
     throw error;
   }
 }
 
+function broadcastStreamingStart(url, debugInfo, tabId = null, requestToken = null) {
+  if (!debugInfo && requestToken === null) return;
+  const videoId = (() => {
+    try {
+      if (!url) return null;
+      const parsed = new URL(url);
+      if (parsed.hostname.includes('youtube.com') && parsed.searchParams.has('v')) {
+        return parsed.searchParams.get('v');
+      }
+    } catch (error) {}
+    return null;
+  })();
+  
+  const message = {
+    type: 'start',
+    url,
+    videoId,
+    debugInfo: debugInfo || null,
+    requestToken
+  };
+  
+  chrome.runtime.sendMessage(message).catch(() => {});
+  
+  if (tabId) {
+    chrome.tabs.sendMessage(tabId, message).catch(() => {});
+  } else {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0]) {
+        chrome.tabs.sendMessage(tabs[0].id, message).catch(() => {});
+      }
+    });
+  }
+}
+
 // Broadcast streaming updates to all display surfaces
-function broadcastStreamingUpdate(partialSummary, url) {
+function broadcastStreamingUpdate(partialSummary, url, tabId = null, requestToken = null) {
   const formatted = formatAISummary(partialSummary);
   const videoId = (() => {
     try {
@@ -558,28 +641,52 @@ function broadcastStreamingUpdate(partialSummary, url) {
   })();
   
   // Send to side panel if open
-  chrome.runtime.sendMessage({
-    type: 'STREAMING_UPDATE',
-    content: formatted,
+  const message = {
+    type: 'stream',
+    data: formatted,
     url: url,
-    videoId: videoId
-  }).catch(() => {
+    videoId: videoId,
+    requestToken
+  };
+  
+  chrome.runtime.sendMessage(message).catch(() => {
     // Side panel not open, ignore
   });
   
   // Send to content script for tooltip
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    if (tabs[0]) {
-      chrome.tabs.sendMessage(tabs[0].id, {
-        type: 'STREAMING_UPDATE',
-        content: formatted,
-        url: url,
-        videoId: videoId
-      }).catch(() => {
-        // Content script not ready, ignore
-      });
-    }
-  });
+  if (tabId) {
+    chrome.tabs.sendMessage(tabId, message).catch(() => {});
+  } else {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0]) {
+        chrome.tabs.sendMessage(tabs[0].id, message).catch(() => {
+          // Content script not ready, ignore
+        });
+      }
+    });
+  }
+}
+
+function broadcastStreamingEnd(status, url, tabId = null, videoId = null, requestToken = null, payload = null) {
+  const message = {
+    type: status,
+    url,
+    videoId,
+    data: payload || null,
+    requestToken
+  };
+  
+  chrome.runtime.sendMessage(message).catch(() => {});
+  
+  if (tabId) {
+    chrome.tabs.sendMessage(tabId, message).catch(() => {});
+  } else {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0]) {
+        chrome.tabs.sendMessage(tabs[0].id, message).catch(() => {});
+      }
+    });
+  }
 }
 
 // Format AI summary to HTML
@@ -1694,6 +1801,29 @@ function clipTranscript(text, limit) {
 // YOUTUBE HIDDEN TAB HELPERS
 // ========================================
 
+async function ensureYouTubeCaptionHandlerInjected(tabId) {
+  if (!tabId) return;
+  const scriptUrl = chrome.runtime.getURL('youtube/youtube-caption-handler.js');
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (url) => {
+        if (document.documentElement.querySelector('script[data-hover-caption-handler]')) {
+          return;
+        }
+        const script = document.createElement('script');
+        script.src = url;
+        script.type = 'text/javascript';
+        script.setAttribute('data-hover-caption-handler', 'true');
+        document.documentElement.appendChild(script);
+      },
+      args: [scriptUrl]
+    });
+  } catch (error) {
+    console.error('[YouTube] Failed to inject caption handler:', error);
+  }
+}
+
 
 // ========================================
 // AUTHENTICATED TRANSCRIPT FETCH HELPERS
@@ -1725,8 +1855,8 @@ async function generateSapiSidHash(sapiSidCookie) {
 
 
 
-async function handleYouTubeSummary(videoId, url, tabId) {
-  console.log('[YouTube] Handling summary request for:', videoId, 'on tab', tabId);
+async function handleYouTubeSummary(videoId, url, tabId, requestToken = null) {
+  console.log('[YouTube] Handling summary request for:', videoId, 'on tab', tabId, 'token:', requestToken);
 
   if (currentYouTubeAbortController && currentYouTubeVideoId !== videoId) {
     currentYouTubeAbortController.abort();
@@ -1738,7 +1868,15 @@ async function handleYouTubeSummary(videoId, url, tabId) {
 
   if (youtubeSummaryCache.has(videoId)) {
     const cached = youtubeSummaryCache.get(videoId);
-    return { status: 'complete', cached: true, summary: cached.summary, videoId };
+    if (cached?.summary && tabId) {
+      console.log(`[YouTube] Found cached summary for ${videoId}. Streaming it back with token #${requestToken}.`);
+      setTimeout(() => {
+        broadcastStreamingStart(url, null, tabId, requestToken);
+        broadcastStreamingUpdate(cached.summary, url, tabId, requestToken);
+        broadcastStreamingEnd('end', url, tabId, videoId, requestToken);
+      }, 0);
+    }
+    return { status: 'complete', cached: true, videoId };
   }
 
   let captionData = youtubeCaptionCache.get(videoId)?.data || null;
@@ -1746,6 +1884,7 @@ async function handleYouTubeSummary(videoId, url, tabId) {
   if (!captionData && tabId) {
     console.log('[YouTube] No cached captions. Starting full delegation process...');
     try {
+      await ensureYouTubeCaptionHandlerInjected(tabId);
       console.log('[YouTube] Asking content script for ground-truth HTML...');
       const [htmlResult] = await chrome.scripting.executeScript({
         target: { tabId },
@@ -1840,15 +1979,30 @@ async function handleYouTubeSummary(videoId, url, tabId) {
   const captionText = captionData?.text || '';
 
   if (!captionText && !descriptionText) {
+    if (tabId) {
+      broadcastStreamingEnd('error', url, tabId, videoId, requestToken, 'No transcripts or description available.');
+    }
     return { status: 'error', error: 'NO_CONTENT', message: 'No transcripts or description available.' };
   }
 
-  const { inputText } = buildYouTubeSummarizationInput({ captionText, descriptionText, videoId });
+  const { inputText, metadata: summarizationMetadata } = buildYouTubeSummarizationInput({
+    captionText, descriptionText, videoId
+  });
+  
+  const debugInfo = {
+    videoId,
+    captionSource: captionData?.source || (captionText ? 'unknown' : 'none'),
+    captionLength: captionText.length,
+    descriptionLength: descriptionText.length,
+    totalInputLength: inputText.length,
+    finalInputText: inputText,
+    requestToken
+  };
 
   try {
-    const summary = await summarizeContent(inputText, signal, url);
+    const summary = await summarizeContent(inputText, signal, url, { debugInfo, tabId, requestToken });
     youtubeSummaryCache.set(videoId, { summary, timestamp: Date.now() });
-    return { status: 'complete', summary, videoId };
+    return { status: 'complete', summary, videoId, compression: summarizationMetadata };
   } catch (error) {
     if (error.name === 'AbortError') return { status: 'aborted' };
     return { status: 'error', error: 'SUMMARY_FAILED', message: error.message };
@@ -2045,10 +2199,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const videoId = message.videoId;
     const url = message.url;
     const tabId = sender?.tab?.id || message.tabId || null;
+    const requestToken = message.requestToken || null;
     
-    console.log('[Background] YouTube summary requested for:', videoId);
+    console.log('[Background] YouTube summary requested for:', videoId, 'token:', requestToken);
     
-    handleYouTubeSummary(videoId, url, tabId)
+    handleYouTubeSummary(videoId, url, tabId, requestToken)
       .then(result => {
         console.log('[Background] YouTube summary result:', result.status);
         sendResponse(result);
@@ -2085,5 +2240,3 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 });
-
-

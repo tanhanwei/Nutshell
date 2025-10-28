@@ -22,12 +22,6 @@
       "matches": ["<all_urls>"],
       "js": ["lib/Readability.js", "content.js"],
       "run_at": "document_idle"
-    },
-    {
-      "matches": ["*://*.youtube.com/*"],
-      "js": ["youtube/youtube-content-bridge.js"],
-      "run_at": "document_start",
-      "all_frames": false
     }
   ],
   "side_panel": {
