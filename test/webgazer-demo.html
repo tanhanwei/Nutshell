@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>WebGazer Hover Prototype</title>
+    <link rel="stylesheet" href="../experiments/eye-tracking/webgazer-demo.css">
+    <script defer src="../lib/Readability.js"></script>
+    <script defer src="../experiments/eye-tracking/webgazer-prototype.js"></script>
+  </head>
+  <body>
+    <div id="webgazer-demo-controls" role="complementary" aria-live="polite">
+      <h2>Eye Hover Controls</h2>
+      <button id="wg-start-calibration">Start Webcam Calibration</button>
+      <button id="wg-begin-hover" disabled>Begin Gaze Hover Mode</button>
+      <button id="wg-stop-hover" class="secondary" disabled>Stop Hover Mode</button>
+      <label class="stacked">
+        Camera:
+        <select id="wg-camera-select" aria-label="Camera selection">
+          <option value="">Default camera</option>
+        </select>
+      </label>
+      <button id="wg-refresh-cameras" type="button" class="tertiary">Refresh camera list</button>
+      <label>
+        <input id="wg-toggle-preview" type="checkbox" checked>
+        Show webcam preview while calibrating
+      </label>
+      <label class="stacked">
+        Dwell threshold:
+        <input id="wg-dwell-threshold" type="number" min="350" step="50" value="750"> ms
+      </label>
+      <button id="wg-refine-calibration" type="button" class="secondary" disabled>Run Fine-Tune Calibration</button>
+      <div id="webgazer-status">Press “Start Webcam Calibration” to begin.</div>
+      <p class="webgazer-note">
+        The WebGazer library is loaded from <code>lib/webgazer.js</code> if present, falling back to
+        <a href="https://webgazer.cs.brown.edu/" target="_blank" rel="noopener noreferrer">the official CDN</a>.
+      </p>
+    </div>
+    <main>
+      <h1>WebGazer-Powered Hover Prototype</h1>
+      <p>
+        This experimental page shows how eye tracking can drive the existing summarizer workflow
+        without modifying production hover logic. Calibrate your gaze, then stare at any card
+        below for roughly three quarters of a second to trigger a summary request.
+      </p>
+      <p>
+        For best results, sit in a well-lit room, keep your head steady, and click each blue
+        calibration dot three times when prompted so WebGazer can learn your gaze offsets.
+        Summaries require loading this page inside the extension so it can call
+        <code>chrome.runtime</code>; otherwise you will see placeholder hover content.
+      </p>
+      <section>
+        <h2>Sample Articles</h2>
+        <ul class="sample-links">
+          <li>
+            <a href="https://www.theverge.com/tech">The Verge — Technology</a>
+            <span>Daily coverage of gadgets, Silicon Valley, and science.</span>
+          </li>
+          <li>
+            <a href="https://www.npr.org/sections/health/">NPR — Health News</a>
+            <span>Reporting on public health policy and medical research.</span>
+          </li>
+          <li>
+            <a href="https://www.nature.com/news">Nature — Research Highlights</a>
+            <span>Breakthroughs and commentary from the scientific community.</span>
+          </li>
+          <li>
+            <a href="https://www.politico.com/">Politico</a>
+            <span>Politics, policy, and power in Washington.</span>
+          </li>
+          <li>
+            <a href="https://www.economist.com/finance-and-economics">The Economist — Finance &amp; Economics</a>
+            <span>Global markets, business trends, and fiscal policy.</span>
+          </li>
+          <li>
+            <a href="https://www.espn.com/">ESPN</a>
+            <span>Scores, highlights, and commentary across major sports.</span>
+          </li>
+          <li>
+            <a href="https://www.vox.com/">Vox</a>
+            <span>Explainers that connect the dots on current events.</span>
+          </li>
+          <li>
+            <a href="https://arstechnica.com/">Ars Technica</a>
+            <span>Deep dives into software, hardware, and policy for tech enthusiasts.</span>
+          </li>
+        </ul>
+      </section>
+      <section>
+        <h2>Prototype Notes</h2>
+        <ul>
+          <li>WebGazer runs entirely on-device; no video leaves your browser.</li>
+          <li>
+            Hold your gaze steady on a link for the dwell threshold to request a summary.
+            A blue outline indicates the current gaze target.
+          </li>
+          <li>
+            When running as part of the extension, summaries stream into the tooltip just like
+            traditional mouse hovers thanks to the new per-request job tracking.
+          </li>
+          <li>You can adjust the dwell timer in the control panel to reduce false positives.</li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

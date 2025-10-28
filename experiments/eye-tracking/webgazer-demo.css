@@ -1,0 +1,241 @@
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  margin: 0;
+  padding: 0;
+  background: #f7f7fb;
+  color: #1a1a1a;
+  line-height: 1.6;
+}
+
+main {
+  max-width: 960px;
+  margin: 40px auto;
+  padding: 0 24px 80px;
+}
+
+h1 {
+  font-size: 2.2rem;
+  margin-bottom: 12px;
+}
+
+p,
+li {
+  font-size: 1rem;
+}
+
+ul.sample-links {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  list-style: none;
+  padding: 0;
+  margin: 32px 0;
+}
+
+ul.sample-links li {
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+  padding: 18px;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+ul.sample-links li:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.15);
+}
+
+ul.sample-links a {
+  display: block;
+  font-weight: 600;
+  text-decoration: none;
+  color: #1d4ed8;
+}
+
+ul.sample-links span {
+  display: block;
+  margin-top: 8px;
+  color: #475569;
+}
+
+#webgazer-demo-controls {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  width: 280px;
+  background: white;
+  border-radius: 16px;
+  padding: 20px;
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.25);
+  z-index: 2147483600;
+}
+
+#webgazer-demo-controls h2 {
+  font-size: 1.1rem;
+  margin: 0 0 12px;
+}
+
+#webgazer-demo-controls button {
+  width: 100%;
+  appearance: none;
+  border: none;
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: white;
+  background: #2563eb;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+#webgazer-demo-controls button[disabled] {
+  background: #94a3b8;
+  cursor: not-allowed;
+}
+
+#webgazer-demo-controls button.secondary {
+  background: #0f172a;
+}
+
+#webgazer-demo-controls label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+  color: #334155;
+  margin-top: 6px;
+}
+
+#webgazer-demo-controls label.stacked {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+#webgazer-demo-controls select,
+#webgazer-demo-controls input[type="number"] {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid #cbd5f5;
+  padding: 8px 10px;
+  font-size: 0.9rem;
+  background: #f8fafc;
+  color: #0f172a;
+}
+
+#webgazer-demo-controls select:focus,
+#webgazer-demo-controls input[type="number"]:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+
+#webgazer-demo-controls button.tertiary {
+  background: #475569;
+}
+
+#webgazerVideoContainer,
+#webgazerVideoFeed,
+#webgazerVideoCanvas,
+#webgazerFaceOverlay,
+#webgazerFaceFeedbackBox {
+  z-index: 2147483400 !important;
+  pointer-events: none !important;
+}
+
+#webgazerGazeDot {
+  display: none !important;
+}
+
+#custom-gaze-indicator {
+  position: fixed;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(239, 68, 68, 0.95);
+  border: 2px solid #b91c1c;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.55);
+  pointer-events: none;
+  z-index: 2147483630;
+  transform: translate(-50%, -50%);
+  display: none;
+}
+
+#webgazer-status {
+  margin-top: 12px;
+  font-size: 0.9rem;
+  color: #0f172a;
+  min-height: 32px;
+}
+
+.webgazer-gaze-highlight {
+  position: relative;
+  outline: 3px solid rgba(59, 130, 246, 0.8);
+  border-radius: 8px;
+  background: rgba(59, 130, 246, 0.08);
+  transition: outline-color 0.2s ease;
+}
+
+#webgazer-tooltip {
+  position: fixed;
+  max-width: 420px;
+  min-width: 320px;
+  bottom: 32px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 18px 20px;
+  border-radius: 14px;
+  background: white;
+  box-shadow: 0 16px 42px rgba(15, 23, 42, 0.28);
+  font-size: 0.95rem;
+  color: #111827;
+  line-height: 1.7;
+  z-index: 2147483600;
+  display: none;
+}
+
+#webgazer-tooltip.visible {
+  display: block;
+}
+
+#webgazer-tooltip .tooltip-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: #1d4ed8;
+}
+
+#webgazer-tooltip .tooltip-body {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+#webgazer-tooltip .tooltip-body ul {
+  margin: 12px 0;
+  padding-left: 22px;
+}
+
+#webgazer-tooltip .tooltip-body li {
+  margin-bottom: 6px;
+}
+
+.webgazer-note {
+  font-size: 0.85rem;
+  color: #475569;
+  margin-top: 6px;
+}
+
+.webgazer-hotspot {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: rgba(59, 130, 246, 0.5);
+  margin: 0 6px;
+  vertical-align: middle;
+}
+
+.webgazer-calibration-point {
+  transition: transform 0.2s ease, opacity 0.2s ease, background 0.2s ease;
+}
