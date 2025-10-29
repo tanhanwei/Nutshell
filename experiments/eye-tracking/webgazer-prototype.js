@@ -5,14 +5,43 @@
   const RETRIGGER_COOLDOWN_MS = 600;
   const STATUS_OK = 'var(--status-ok, #16a34a)';
   const STATUS_WARN = 'var(--status-warn, #dc2626)';
-  const PREDICTION_BUFFER_SIZE = 14;
-  const PREDICTION_BUFFER_WINDOW_MS = 450;
+  const PREDICTION_BUFFER_SIZE = 60;
+  const PREDICTION_BUFFER_WINDOW_MS = 1000;
   const MIN_STABLE_ANCHOR_HITS = 4;
   const ANCHOR_DRIFT_THRESHOLD_PX = 68;
   const RECT_PADDING_PX = 14;
-  const CALIBRATION_SAMPLE_WINDOW_MS = 420;
+  const CALIBRATION_SAMPLE_WINDOW_MS = 560;
+  const REFINEMENT_SAMPLE_WINDOW_MS = 320;
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+  const SMOOTHING_WINDOW = 5;
+  const MAX_JUMP_DISTANCE = 180;
+  const MAX_CALIBRATION_SAMPLES = 120;
+  const RECENCY_HALF_LIFE_MS = 60000;
+  const POSE_CONFIDENCE_THRESHOLD = 0.25;
+  const POSE_BASELINE_TARGET = 40;
+  const POSE_BASELINE_MIN_FRAMES = 22;
+  const POSE_NEUTRAL_TOLERANCE = 0.22;
+  const POSE_SMOOTH_ALPHA = 0.35;
+  const POSE_HOLD_DURATION_MS = 700;
+  const POSE_TIER_PREP_MS = 700;
+  const POSE_BASELINE_FALLBACK_MS = 4500;
+  // --- Stability / smoothing config ---
+  const STABILITY_WINDOW_MS = 1000;
+  const STABILITY_MIN_SAMPLES = 8;
+  const TRANSFORM_UPDATE_MIN_INTERVAL_MS = 350;
+  const poseTiers = [
+    { id: 'center', instruction: 'Keep your head centered and look at the dot.', yaw: 0, pitch: 0 },
+    { id: 'left', instruction: 'Turn your head LEFT slightly, keep eyes on the dot.', yaw: -0.35, pitch: 0 },
+    { id: 'right', instruction: 'Turn your head RIGHT slightly, keep eyes on the dot.', yaw: 0.35, pitch: 0 },
+    { id: 'up', instruction: 'Tilt your head UP slightly, keep eyes on the dot.', yaw: 0, pitch: -0.25 },
+    { id: 'down', instruction: 'Tilt your head DOWN slightly, keep eyes on the dot.', yaw: 0, pitch: 0.25 },
+    { id: 'return', instruction: 'Return your head to center and keep eyes on the dot.', yaw: 0, pitch: 0 }
+  ];
+
+  let clmEnsurePromise = null;
+  let clmTrackerModuleReady = false;
+  let clmModelEnsurePromise = null;
 
   const state = {
     webgazerReady: false,
@@ -39,20 +68,57 @@
     statusEl: null,
     highlightClass: 'webgazer-gaze-highlight',
     runtimeListener: null,
+    trackerFallbackTimer: null,
+    trackerFallbackDelay: null,
     predictionBuffer: [],
     selectedCameraId: null,
     cameraDevices: [],
     restartInProgress: false,
     customGazeDot: null,
+    poseBtnDefaultLabel: null,
     calibrationSamples: [],
     calibrationTransform: {
       matrix: [
-        [1, 0, 0],
-        [0, 1, 0]
+        [1, 0, 0, 0, 0],
+        [0, 1, 0, 0, 0]
       ],
       ready: false
     },
-    calibrationCapture: null
+    calibrationCapture: null,
+    smoothing: {
+      history: [],
+      smoothed: null,
+      pendingJump: null
+    },
+    pose: {
+      smoothed: null,
+      baseline: { yaw: 0, pitch: 0, roll: 0, count: 0, ready: false }
+    },
+    poseTierIndex: 0,
+    poseTierActive: false,
+    poseTierTimer: null,
+    poseTierMonitor: null,
+    poseTierHoldStart: null,
+    poseTierCapturing: false,
+    indicatorAlwaysOn: false,
+    lastRefinementAt: 0,
+    poseBaselineReadyMonitor: null,
+    poseBaselineMonitorStartedAt: null,
+    poseBaselineFallbackTriggered: false,
+    lastStatusMessage: null,
+    poseDebug: {
+      lastMeasurementLog: 0,
+      lastMissingLog: 0,
+      missingActive: false
+    },
+    stability: {
+      lastRecomputeAt: 0,
+      hardGateUntil: 0,
+      stable: false,
+      stableSince: null,
+      unstableSince: null
+    },
+    euro: null
   };
 
   const controls = {};
@@ -66,10 +132,105 @@
     setupRuntimeListener();
   });
 
+  function debugLog(event, details = undefined) {
+    if (typeof console !== 'object' || typeof console.info !== 'function') return;
+    try {
+      const label = `[WebGazer Prototype] ${event}`;
+      if (details === undefined) {
+        console.info(label);
+      } else if (details && typeof details === 'object') {
+        let snapshot = details;
+        let stringified = null;
+        try {
+          snapshot = Object.assign({}, details);
+          stringified = JSON.stringify(details, null, 2);
+        } catch (_err) {
+          // fall back to direct reference
+        }
+        console.info(label, snapshot);
+        if (stringified) {
+          console.info(`${label} ${stringified}`);
+        }
+      } else {
+        console.info(label, details);
+      }
+    } catch (_error) {
+      // ignore logging failures
+    }
+  }
+
+  // --- One-Euro filter (2D) ---
+  function _alpha(dt, cutoff) {
+    const tau = 1 / (2 * Math.PI * cutoff);
+    return 1 / (1 + tau / dt);
+  }
+  class _LPF {
+    constructor() {
+      this.y = null;
+      this.ready = false;
+    }
+    filter(x, alpha) {
+      if (!this.ready) {
+        this.y = x;
+        this.ready = true;
+        return x;
+      }
+      this.y = this.y + alpha * (x - this.y);
+      return this.y;
+    }
+  }
+  class OneEuro {
+    constructor({ minCutoff = 1.0, beta = 0.02, dCutoff = 1.0 } = {}) {
+      this.minCutoff = minCutoff;
+      this.beta = beta;
+      this.dCutoff = dCutoff;
+      this.x = new _LPF();
+      this.y = new _LPF();
+      this.dx = new _LPF();
+      this.dy = new _LPF();
+      this._t = null;
+    }
+    filter(point, tSec = performance.now() / 1000) {
+      const dt = this._t ? Math.max(1 / 240, tSec - this._t) : 1 / 60;
+      this._t = tSec;
+      const alphaD = _alpha(dt, this.dCutoff);
+      const dx = this.dx.filter(this.x.ready ? (point.x - this.x.y) / Math.max(dt, 1e-3) : 0, alphaD);
+      const dy = this.dy.filter(this.y.ready ? (point.y - this.y.y) / Math.max(dt, 1e-3) : 0, alphaD);
+      const cutoffX = this.minCutoff + this.beta * Math.abs(dx);
+      const cutoffY = this.minCutoff + this.beta * Math.abs(dy);
+      const alphaX = _alpha(dt, cutoffX);
+      const alphaY = _alpha(dt, cutoffY);
+      return {
+        x: this.x.filter(point.x, alphaX),
+        y: this.y.filter(point.y, alphaY)
+      };
+    }
+  }
+
+  function isPromiseLike(value) {
+    return value != null && typeof value === 'object' && typeof value.then === 'function';
+  }
+
+  async function getCurrentPredictionAsync() {
+    try {
+      const raw = window.webgazer?.getCurrentPrediction?.();
+      if (isPromiseLike(raw)) {
+        return await raw;
+      }
+      return raw || null;
+    } catch (error) {
+      debugLog('get-prediction-error', { error: error?.message || String(error) });
+      return null;
+    }
+  }
+
+  window.getCurrentPredictionAsync = getCurrentPredictionAsync;
+
   function cacheControls() {
     controls.startBtn = document.getElementById('wg-start-calibration');
     controls.beginBtn = document.getElementById('wg-begin-hover');
     controls.stopBtn = document.getElementById('wg-stop-hover');
+    controls.poseBtn = document.getElementById('wg-start-pose');
     controls.previewToggle = document.getElementById('wg-toggle-preview');
     controls.status = document.getElementById('webgazer-status');
     controls.dwellInput = document.getElementById('wg-dwell-threshold');
@@ -107,6 +268,47 @@
     if (controls.refineBtn) {
       controls.refineBtn.addEventListener('click', handleRefineCalibration);
     }
+    if (controls.poseBtn) {
+      controls.poseBtn.addEventListener('click', () => {
+        startPoseCalibrationSequence();
+      });
+      state.poseBtnDefaultLabel = controls.poseBtn.textContent || 'Run Pose Calibration';
+    }
+  }
+
+  function clearPoseBaselineMonitor(options = {}) {
+    if (state.poseBaselineReadyMonitor) {
+      clearInterval(state.poseBaselineReadyMonitor);
+      state.poseBaselineReadyMonitor = null;
+    }
+    state.poseBaselineMonitorStartedAt = null;
+    if (options.resetFallback) {
+      state.poseBaselineFallbackTriggered = false;
+    }
+    state.poseDebug.lastMeasurementLog = 0;
+    state.poseDebug.lastMissingLog = 0;
+    state.poseDebug.missingActive = false;
+    updatePoseBaselineProgressDisplay(null);
+  }
+
+  function markPoseBaselineUnavailable() {
+    state.poseBaselineFallbackTriggered = true;
+    updatePoseBaselineProgressDisplay(null);
+    debugLog('pose-baseline-landmarks-missing');
+    if (!controls.poseBtn) return;
+    const label = state.poseBtnDefaultLabel || 'Run Pose Calibration';
+    controls.poseBtn.textContent = `${label} — landmarks unavailable`;
+  }
+
+  function updatePoseBaselineProgressDisplay(progressPercent) {
+    if (!controls.poseBtn) return;
+    const label = state.poseBtnDefaultLabel || 'Run Pose Calibration';
+    if (progressPercent == null || Number.isNaN(progressPercent)) {
+      controls.poseBtn.textContent = label;
+      return;
+    }
+    const clamped = clamp(Math.round(progressPercent), 0, 100);
+    controls.poseBtn.textContent = `${label} — stabilising ${clamped}%`;
   }
 
   async function populateCameraOptions() {
@@ -183,26 +385,35 @@
       state.calibrationConfig.completed = false;
       state.calibrationConfig.primaryComplete = false;
       state.predictionBuffer = [];
+      state.stability.hardGateUntil = performance.now() + 1500;
+      state.stability.stable = false;
+      state.stability.stableSince = null;
+      state.stability.unstableSince = null;
       if (controls.beginBtn) controls.beginBtn.disabled = true;
       if (controls.refineBtn) controls.refineBtn.disabled = true;
-      await cleanupWebGazer();
+      await cleanupWebGazer({ hard: false });
       await startCalibrationWorkflow({ triggeredByCameraChange: true });
     } finally {
       state.restartInProgress = false;
     }
   }
 
-  function applyCameraConstraint(gaze) {
-    if (!gaze || !gaze.params) return;
-    const constraints = gaze.params.camConstraints || {};
-    const videoConstraints = constraints.video || {};
-    if (state.selectedCameraId) {
-      videoConstraints.deviceId = { exact: state.selectedCameraId };
-    } else if (videoConstraints.deviceId) {
-      delete videoConstraints.deviceId;
+  function applyCameraConstraint() {
+    const gaze = window.webgazer;
+    if (!gaze) return;
+    const hasPublicSetter = typeof gaze.setCameraConstraints === 'function';
+    const constraints = state.selectedCameraId
+      ? { video: { deviceId: { exact: state.selectedCameraId } } }
+      : { video: true };
+    try {
+      if (hasPublicSetter) {
+        gaze.setCameraConstraints(constraints);
+      } else if (gaze.params) {
+        gaze.params.camConstraints = constraints;
+      }
+    } catch (error) {
+      debugLog('camera-constraint-error', { error: error?.message || String(error) });
     }
-    constraints.video = videoConstraints;
-    gaze.params.camConstraints = constraints;
   }
 
   async function handleStartCalibration() {
@@ -215,43 +426,92 @@
     }
     if (controls.beginBtn) controls.beginBtn.disabled = true;
     if (controls.refineBtn) controls.refineBtn.disabled = true;
+    if (controls.poseBtn) controls.poseBtn.disabled = true;
+    updatePoseBaselineProgressDisplay(null);
+    state.indicatorAlwaysOn = false;
+    clearPoseBaselineMonitor({ resetFallback: true });
+    updateCustomGazeIndicator(null);
+    state.poseTierActive = false;
+    state.poseTierCapturing = false;
+    state.poseTierHoldStart = null;
+    if (state.poseTierTimer) {
+      clearTimeout(state.poseTierTimer);
+      state.poseTierTimer = null;
+    }
+    if (state.poseTierMonitor) {
+      clearInterval(state.poseTierMonitor);
+      state.poseTierMonitor = null;
+    }
     state.predictionBuffer = [];
+    debugLog('calibration-started', { cameraChange: triggeredByCameraChange });
     updateStatus('Loading WebGazer… please allow camera access.');
     try {
       await ensureWebGazerLoaded();
       const gaze = window.webgazer;
       if (!gaze) throw new Error('WebGazer unavailable after load.');
 
-      applyCameraConstraint(gaze);
+      applyCameraConstraint();
 
       try {
-        if (typeof gaze.pause === 'function') gaze.pause();
+        if (typeof gaze.pause === 'function') await gaze.pause();
       } catch (error) {
-        console.debug('[WebGazer Prototype] pause() during restart failed:', error);
-      }
-      try {
-        if (typeof gaze.end === 'function') await gaze.end();
-      } catch (error) {
-        console.debug('[WebGazer Prototype] end() during restart failed:', error);
+        debugLog('webgazer-pause-warning', { error: error?.message || String(error) });
       }
 
       if (typeof gaze.clearData === 'function') {
         try {
           await gaze.clearData();
         } catch (error) {
-          console.debug('[WebGazer Prototype] clearData() failed:', error);
+          debugLog('webgazer-clear-warning', { error: error?.message || String(error) });
         }
       }
 
-      await gaze.setRegression('ridge');
-      await selectAvailableTracker(gaze);
+      ensureClmTrackerModuleRegistered();
+      try {
+        if (typeof gaze.setTracker === 'function') {
+          gaze.setTracker('clmtrackr');
+        }
+      } catch (error) {
+        debugLog('setTracker-error', { error: error?.message || String(error) });
+      }
 
-      gaze.params.showGazeDot = true;
-      gaze.params.saveDataAcrossSessions = false;
-      gaze.params.storingPoints = false;
-      applyCameraConstraint(gaze);
-      gaze.setGazeListener(handleGazePrediction);
-      await gaze.begin();
+      try {
+        if (typeof gaze.setRegression === 'function') {
+          gaze.setRegression('ridge');
+        }
+      } catch (error) {
+        debugLog('setRegression-error', { error: error?.message || String(error) });
+      }
+
+      if (typeof gaze.saveDataAcrossSessions === 'function') {
+        try {
+          gaze.saveDataAcrossSessions(false);
+        } catch (error) {
+          debugLog('save-data-sessions-error', { error: error?.message || String(error) });
+        }
+      } else {
+        gaze.params.saveDataAcrossSessions = false;
+      }
+
+      applyCameraConstraint();
+
+      if (typeof gaze.showPredictionPoints === 'function') {
+        try {
+          gaze.showPredictionPoints(true);
+        } catch (error) {
+          debugLog('show-prediction-points-error', { error: error?.message || String(error) });
+        }
+      } else if (gaze.params) {
+        gaze.params.showGazeDot = true;
+      }
+
+      if (typeof gaze.setGazeListener === 'function') {
+        gaze.setGazeListener(handleGazePrediction);
+      }
+
+      if (typeof gaze.begin === 'function') {
+        await gaze.begin();
+      }
 
       await waitForWebgazerDomElements();
       ensureWebgazerSupportCanvases();
@@ -281,12 +541,111 @@
       state.calibrationSamples = [];
       state.calibrationTransform = {
         matrix: [
-          [1, 0, 0],
-          [0, 1, 0]
+          [1, 0, 0, 0, 0],
+          [0, 1, 0, 0, 0]
         ],
         ready: false
       };
-      finalizeCalibrationCapture(true);
+      state.smoothing = {
+        history: [],
+        smoothed: null,
+        pendingJump: null
+      };
+      state.euro = new OneEuro({ minCutoff: 0.7, beta: 0.02, dCutoff: 1.0 });
+      state.stability.lastRecomputeAt = 0;
+      state.stability.hardGateUntil = performance.now() + 1500;
+      state.stability.stable = false;
+      state.stability.stableSince = null;
+      state.stability.unstableSince = null;
+      state.pose.baseline = { yaw: 0, pitch: 0, roll: 0, count: 0, ready: false };
+      state.pose.smoothed = null;
+      state.poseTierIndex = 0;
+      state.poseTierActive = false;
+      if (state.poseTierTimer) {
+        clearTimeout(state.poseTierTimer);
+        state.poseTierTimer = null;
+      }
+      if (state.poseTierMonitor) {
+        clearInterval(state.poseTierMonitor);
+        state.poseTierMonitor = null;
+      }
+      state.poseTierHoldStart = null;
+      state.poseTierCapturing = false;
+      state.indicatorAlwaysOn = false;
+      state.lastRefinementAt = 0;
+      if (state.trackerFallbackTimer) {
+        clearInterval(state.trackerFallbackTimer);
+        state.trackerFallbackTimer = null;
+      }
+      if (state.trackerFallbackDelay) {
+        clearTimeout(state.trackerFallbackDelay);
+        state.trackerFallbackDelay = null;
+      }
+      if (gaze) {
+        const FALLBACK_PROBE_DELAY_MS = 5000;
+        const FALLBACK_PROBE_INTERVAL_MS = 450;
+        const FALLBACK_MIN_FRAMES = 75;
+        const FALLBACK_REQUIRED_LOST_MS = 2500;
+
+        const startProbe = () => {
+          if (state.trackerFallbackTimer) {
+            clearInterval(state.trackerFallbackTimer);
+            state.trackerFallbackTimer = null;
+          }
+          state.trackerFallbackTimer = setInterval(async () => {
+            try {
+              if (!state.webgazerReady) return;
+              const tracker = typeof gaze.getTracker === 'function' ? gaze.getTracker() : null;
+              const name = (tracker?.name || tracker?.constructor?.name || '').toLowerCase();
+              if (!name.includes('clm')) {
+                clearInterval(state.trackerFallbackTimer);
+                state.trackerFallbackTimer = null;
+                return;
+              }
+
+              const { feedReady } = _resolveTrackTarget(null);
+              if (!feedReady) {
+                return;
+              }
+
+              const health = typeof tracker?.getHealth === 'function' ? tracker.getHealth() : null;
+              const recent = Boolean(health?.recent);
+              const frames = Number.isFinite(health?.frames) ? health.frames : 0;
+              const lostMs = Number.isFinite(health?.lostMs) ? health.lostMs : Infinity;
+              const points = Number.isFinite(health?.points) ? health.points : 0;
+
+              if (recent || points >= 32) {
+                debugLog('tracker-health-ok', { recent, frames, lostMs, points });
+                clearInterval(state.trackerFallbackTimer);
+                state.trackerFallbackTimer = null;
+                return;
+              }
+
+              if (frames >= FALLBACK_MIN_FRAMES && lostMs >= FALLBACK_REQUIRED_LOST_MS && typeof gaze.setTracker === 'function') {
+                await gaze.setTracker('TFFacemesh');
+                clearInterval(state.trackerFallbackTimer);
+                state.trackerFallbackTimer = null;
+                debugLog('tracker-switched-fallback', { to: 'TFFacemesh', reason: { frames, lostMs, points } });
+              }
+            } catch (error) {
+              debugLog('tracker-fallback-error', { error: error?.message || String(error) });
+            }
+          }, FALLBACK_PROBE_INTERVAL_MS);
+        };
+
+        state.trackerFallbackDelay = setTimeout(() => {
+          state.trackerFallbackDelay = null;
+          startProbe();
+        }, FALLBACK_PROBE_DELAY_MS);
+      }
+    finalizeCalibrationCapture(true);
+    if (controls.poseBtn) controls.poseBtn.disabled = true;
+      state.calibrationConfig.stage = 'primary';
+      state.calibrationConfig.primaryComplete = false;
+      state.calibrationConfig.completed = false;
+      state.calibrationConfig.points = [];
+      state.calibrationConfig.counts = new Map();
+      if (controls.poseBtn) controls.poseBtn.disabled = true;
       updateCustomGazeIndicator(null);
 
       initialiseCalibrationTargets('primary');
@@ -313,6 +672,7 @@
       updateStatus('Start calibration before running fine-tune mode.', STATUS_WARN);
       return;
     }
+    clearPoseBaselineMonitor({ resetFallback: true });
     const gaze = window.webgazer;
     if (gaze) {
       waitForWebgazerDomElements(1500).then(() => {
@@ -335,6 +695,10 @@
     state.calibrationConfig.points = [];
     state.calibrationConfig.counts = new Map();
     state.predictionBuffer = [];
+    state.stability.hardGateUntil = performance.now() + 1500;
+    state.stability.stable = false;
+    state.stability.stableSince = null;
+    state.stability.unstableSince = null;
     updateCustomGazeIndicator(null);
     initialiseCalibrationTargets('fine');
     if (controls.beginBtn) controls.beginBtn.disabled = true;
@@ -351,12 +715,18 @@
       updateStatus('Complete the calibration dots before starting hover mode.', STATUS_WARN);
       return;
     }
+    clearPoseBaselineMonitor();
     state.hoverActive = true;
+    state.indicatorAlwaysOn = true;
     state.calibrationMode = false;
+    updateCustomGazeIndicator(state.smoothing.smoothed || null);
     state.predictionBuffer = [];
     state.dwellAnchor = null;
     state.dwellStart = 0;
-    updateCustomGazeIndicator(null);
+    state.stability.hardGateUntil = performance.now() + 1200;
+    state.stability.stable = false;
+    state.stability.stableSince = null;
+    state.stability.unstableSince = null;
     const gaze = window.webgazer;
     if (gaze) {
       try {
@@ -374,6 +744,7 @@
   function stopHoverMode() {
     state.hoverActive = false;
     state.calibrationMode = false;
+    clearPoseBaselineMonitor();
     if (state.dwellAnchor) {
       clearHighlight(state.dwellAnchor);
       state.dwellAnchor = null;
@@ -383,46 +754,121 @@
     state.smoothX = null;
     state.smoothY = null;
     state.predictionBuffer = [];
+    state.stability.hardGateUntil = 0;
+    state.stability.stable = false;
+    state.stability.stableSince = null;
+    state.stability.unstableSince = null;
+    if (state.trackerFallbackTimer) {
+      clearInterval(state.trackerFallbackTimer);
+      state.trackerFallbackTimer = null;
+    }
+    if (state.trackerFallbackDelay) {
+      clearTimeout(state.trackerFallbackDelay);
+      state.trackerFallbackDelay = null;
+    }
     if (controls.startBtn) controls.startBtn.disabled = false;
     if (controls.stopBtn) controls.stopBtn.disabled = true;
-    updateCustomGazeIndicator(null);
+    state.indicatorAlwaysOn = true;
+    updateCustomGazeIndicator(state.smoothing.smoothed || null);
     updateStatus('Hover mode paused. You can resume after recalibrating if needed.');
   }
 
   async function selectAvailableTracker(gaze) {
-    if (!gaze || typeof gaze.getAvailableTrackers !== 'function') {
+    if (!gaze) {
+      debugLog('tracker-selection-skipped', { reason: 'no-gaze-instance' });
       return;
     }
-    const available = gaze.getAvailableTrackers() || [];
-    if (!available.length) {
-      return;
-    }
-    const preferred = ['clmtrackr', 'clmtrackr + ridge', 'TFFacemesh', 'No stream'];
-    for (const candidate of preferred) {
-      if (available.includes(candidate)) {
-        try {
-          // eslint-disable-next-line no-await-in-loop
-          await gaze.setTracker(candidate);
-          console.log('[WebGazer Prototype] Using tracker:', candidate);
-          return;
-        } catch (error) {
-          console.warn('[WebGazer Prototype] Failed to set tracker', candidate, error);
-        }
+    ensureClmTrackerModuleRegistered();
+
+    let available = [];
+    let source = 'unknown';
+    if (typeof gaze.getAvailableTrackers === 'function') {
+      try {
+        available = gaze.getAvailableTrackers() || [];
+        source = 'getAvailableTrackers';
+      } catch (error) {
+        debugLog('tracker-list-error', { error: error?.message || String(error) });
       }
     }
-    const fallback = available[0];
-    try {
-      await gaze.setTracker(fallback);
-      console.log('[WebGazer Prototype] Fallback tracker:', fallback);
-    } catch (error) {
-      console.warn('[WebGazer Prototype] Unable to set fallback tracker:', error);
+
+    if (!available.length && gaze.algorithms && typeof gaze.algorithms === 'object') {
+      const trackerKeys = Object.keys(gaze.algorithms.trackers || {});
+      if (trackerKeys.length) {
+        available = trackerKeys;
+        source = 'algorithms.trackers';
+      }
+    }
+
+    if (!available.length && window.webgazerGlobalSettings && Array.isArray(window.webgazerGlobalSettings.trackers)) {
+      available = [...window.webgazerGlobalSettings.trackers];
+      source = 'globalSettings';
+    }
+
+    debugLog('tracker-available', { list: available, source });
+
+    if (typeof gaze.setTracker !== 'function') {
+      debugLog('tracker-selection-skipped', { reason: 'setTracker-missing' });
+      return;
+    }
+
+    const normalized = new Set(available.map((name) => String(name || '').toLowerCase()));
+    const attempted = new Set();
+    const candidateMatrix = [
+      { canonical: 'clmtrackr', options: ['clmtrackr', 'clmtrackr + ridge', 'clm', 'clmtracker'] },
+      { canonical: 'TFFacemesh', options: ['tffacemesh', 'tf facemesh', 'facemesh'] },
+      { canonical: 'No stream', options: ['no stream', 'nostream'] }
+    ];
+
+    for (const candidate of candidateMatrix) {
+      const alias = candidate.options.find((opt) => normalized.has(opt.toLowerCase()));
+      if (!alias) continue;
+      attempted.add(alias.toLowerCase());
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await gaze.setTracker(alias);
+        debugLog('tracker-selected', { tracker: alias, canonical: candidate.canonical });
+        return;
+      } catch (error) {
+        debugLog('tracker-select-failed', { tracker: alias, error: error?.message || String(error) });
+      }
+    }
+
+    const forcedCandidates = ['clmtrackr', 'clmtrackr + ridge'];
+    for (const forced of forcedCandidates) {
+      const key = forced.toLowerCase();
+      if (attempted.has(key)) continue;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await gaze.setTracker(forced);
+        debugLog('tracker-selected-forced', { tracker: forced });
+        return;
+      } catch (error) {
+        debugLog('tracker-select-forced-failed', { tracker: forced, error: error?.message || String(error) });
+      }
+    }
+
+    if (available.length) {
+      const fallback = available[0];
+      try {
+        await gaze.setTracker(fallback);
+        debugLog('tracker-selected-fallback', { tracker: fallback });
+      } catch (error) {
+        debugLog('tracker-select-fallback-failed', { tracker: fallback, error: error?.message || String(error) });
+      }
+    } else {
+      debugLog('tracker-selection-skipped', { reason: 'no-trackers-detected' });
     }
   }
 
   async function ensureWebGazerLoaded() {
     if (window.webgazer) {
+      await ensureClmTrackrLoaded();
+      ensureClmTrackerModuleRegistered();
+      debugLog('webgazer-present');
       return window.webgazer;
     }
+
+    await ensureClmTrackrLoaded();
 
     const candidateUrls = [];
     try {
@@ -444,10 +890,13 @@
         await loadScript(src);
         if (window.webgazer) {
           console.log('[WebGazer Prototype] Loaded WebGazer from', src);
+          debugLog('webgazer-loaded', { src });
+          ensureClmTrackerModuleRegistered();
           return window.webgazer;
         }
       } catch (error) {
         console.warn('[WebGazer Prototype] Failed to load', src, error);
+        debugLog('webgazer-load-failed', { src, error: error?.message || String(error) });
       }
     }
 
@@ -466,28 +915,544 @@
     });
   }
 
+  async function ensureClmTrackrLoaded() {
+    if (window.clm?.tracker) {
+      debugLog('clmtrackr-present', { source: 'global' });
+      const hasModel = Boolean(window.pModel || (window.clm && window.clm.models && window.clm.models.faceModel));
+      if (!hasModel) {
+        if (!clmModelEnsurePromise) {
+          clmModelEnsurePromise = loadScript('https://unpkg.com/clmtrackr@1.1.2/models/model_pca_20_svm.js')
+            .then(() => {
+              debugLog('clmtrackr-model-loaded');
+            })
+            .catch((error) => {
+              debugLog('clmtrackr-model-missing', { error: error?.message || String(error) });
+              throw error;
+            })
+            .finally(() => {
+              clmModelEnsurePromise = null;
+            });
+        }
+        try {
+          await clmModelEnsurePromise;
+        } catch (_error) {
+          // model load failed; continue so caller can handle downstream
+        }
+      }
+      return;
+    }
+
+    if (clmEnsurePromise) {
+      await clmEnsurePromise;
+      return;
+    }
+
+    clmEnsurePromise = (async () => {
+      const candidateUrls = [];
+      try {
+        const runtimeApi = globalThis.chrome && globalThis.chrome.runtime;
+        if (runtimeApi && typeof runtimeApi.getURL === 'function') {
+          candidateUrls.push(runtimeApi.getURL('vendor/clmtrackr.js'));
+        }
+      } catch (error) {
+        debugLog('clmtrackr-runtime-url-error', { error: error?.message || String(error) });
+      }
+      candidateUrls.push('../vendor/clmtrackr.js');
+      candidateUrls.push('vendor/clmtrackr.js');
+      candidateUrls.push('https://unpkg.com/clmtrackr@1.1.2/build/clmtrackr.js');
+
+      for (const src of candidateUrls) {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          await loadScript(src);
+          if (window.clm?.tracker) {
+            debugLog('clmtrackr-loaded', { src });
+            const hasModel = Boolean(window.pModel || (window.clm && window.clm.models && window.clm.models.faceModel));
+            if (!hasModel) {
+              if (!clmModelEnsurePromise) {
+                clmModelEnsurePromise = loadScript('https://unpkg.com/clmtrackr@1.1.2/models/model_pca_20_svm.js')
+                  .then(() => {
+                    debugLog('clmtrackr-model-loaded', { via: 'module-load' });
+                  })
+                  .catch((error) => {
+                    debugLog('clmtrackr-model-missing', { error: error?.message || String(error), via: 'module-load' });
+                    throw error;
+                  })
+                  .finally(() => {
+                    clmModelEnsurePromise = null;
+                  });
+              }
+              try {
+                await clmModelEnsurePromise;
+              } catch (_error) {
+                // continue even if the model fails to load; downstream logic will handle fallback
+              }
+            }
+            return;
+          }
+          debugLog('clmtrackr-no-global', { src });
+        } catch (error) {
+          debugLog('clmtrackr-load-failed', { src, error: error?.message || String(error) });
+        }
+      }
+      debugLog('clmtrackr-unavailable');
+    })();
+
+    await clmEnsurePromise;
+  }
+
+  function createKalmanPair() {
+    const wg = window.webgazer;
+    const numericLib = window.numeric;
+    const KalmanFilter = wg?.util?.KalmanFilter;
+    if (!wg || !numericLib || typeof KalmanFilter !== 'function') {
+      debugLog('clmtrackr-kalman-unavailable', {
+        hasWebgazer: Boolean(wg),
+        hasNumeric: Boolean(numericLib),
+        hasKalman: typeof KalmanFilter === 'function'
+      });
+      return null;
+    }
+    const F = [
+      [1, 0, 0, 0, 1, 0],
+      [0, 1, 0, 0, 0, 1],
+      [0, 0, 1, 0, 1, 0],
+      [0, 0, 0, 1, 0, 1],
+      [0, 0, 0, 0, 1, 0],
+      [0, 0, 0, 0, 0, 1]
+    ];
+    const baseQ = [
+      [0.25, 0, 0, 0, 0.5, 0],
+      [0, 0.25, 0, 0, 0, 0.5],
+      [0, 0, 0.25, 0, 0.5, 0],
+      [0, 0, 0, 0.25, 0, 0.5],
+      [0.5, 0, 0.5, 0, 1, 0],
+      [0, 0.5, 0, 0.5, 0, 1]
+    ];
+    const H = [
+      [1, 0, 0, 0, 0, 0],
+      [0, 1, 0, 0, 0, 0],
+      [0, 0, 1, 0, 0, 0],
+      [0, 0, 0, 1, 0, 0]
+    ];
+    const deltaT = 0.1;
+    const Q = numericLib.mul(baseQ, deltaT);
+    const pixelError = 6.5;
+    const R = numericLib.mul(numericLib.identity(4), pixelError);
+    const P0 = numericLib.mul(numericLib.identity(6), 0.0001);
+    const x0 = [[200], [150], [250], [180], [0], [0]];
+
+    return {
+      left: new KalmanFilter(F, H, Q, R, P0, x0),
+      right: new KalmanFilter(F, H, Q, R, P0, x0)
+    };
+  }
+
+  function clampRect(x, y, width, height, maxWidth, maxHeight) {
+    let rectX = Math.max(0, Math.min(x, maxWidth - 1));
+    let rectY = Math.max(0, Math.min(y, maxHeight - 1));
+    let rectW = Math.max(1, Math.min(width, maxWidth - rectX));
+    let rectH = Math.max(1, Math.min(height, maxHeight - rectY));
+    return { x: rectX, y: rectY, width: rectW, height: rectH };
+  }
+
+  function _resolveTrackTarget(imageCanvas) {
+    const feed = document.getElementById('webgazerVideoFeed');
+    const feedReady = Boolean(
+      feed &&
+        feed.readyState >= 2 &&
+        (feed.videoWidth > 0 && feed.videoHeight > 0)
+    );
+    const target = feedReady ? feed : imageCanvas;
+    const width = (target && (target.videoWidth || target.width)) || 0;
+    const height = (target && (target.videoHeight || target.height)) || 0;
+
+    return { target, feedReady, width, height };
+  }
+
+  function ensureClmTrackerModuleRegistered() {
+    if (clmTrackerModuleReady) {
+      return;
+    }
+    const wg = window.webgazer;
+    if (!wg || typeof wg.addTrackerModule !== 'function') {
+      debugLog('clmtracker-register-skipped', { reason: 'webgazer-unavailable' });
+      return;
+    }
+    if (!window.clm?.tracker) {
+      debugLog('clmtracker-register-skipped', { reason: 'clmtrackr-missing' });
+      return;
+    }
+    if (wg.tracker?.ClmGaze || wg.tracker?.ClmTrackr) {
+      clmTrackerModuleReady = true;
+      return;
+    }
+
+    const kalmanPair = createKalmanPair();
+
+    const applyKalmanByDefault = typeof wg.params?.applyKalmanFilter === 'boolean' ? wg.params.applyKalmanFilter : true;
+
+    const ClmTrackrAdapter = function() {
+      const params = Object.assign({ useWebGL: true }, wg.params?.clmParams || {});
+      try {
+        this.clm = new window.clm.tracker(params);
+        const model = window.pModel || (window.clm && window.clm.models && window.clm.models.faceModel);
+        this.clm.init(model);
+      } catch (error) {
+        debugLog('clmtrackr-init-error', { error: error?.message || String(error) });
+        this.clm = null;
+      }
+      this.positionsArray = null;
+      this.lastLandmarksAt = 0;
+      this.applyKalman = applyKalmanByDefault;
+      this.started = false;
+      this._lostSince = null;
+      this._framesSinceInit = 0;
+      this._webglRetried = false;
+      this._lastResetAt = 0;
+      this.createKalmanFilters();
+    };
+
+    ClmTrackrAdapter.prototype.createKalmanFilters = function() {
+      if (!kalmanPair || !applyKalmanByDefault) {
+        this.leftKalman = null;
+        this.rightKalman = null;
+        this.applyKalman = false;
+        return;
+      }
+      const pair = createKalmanPair();
+      this.leftKalman = pair?.left || null;
+      this.rightKalman = pair?.right || null;
+      if (!this.leftKalman || !this.rightKalman) {
+        this.applyKalman = false;
+      }
+    };
+
+    ClmTrackrAdapter.prototype.trackFrame = function(imageCanvas) {
+      if (!this.clm) return null;
+
+      const { target, width, height } = _resolveTrackTarget(imageCanvas);
+      if (!target || width === 0 || height === 0) {
+        if (!this._lostSince) {
+          this._lostSince = performance.now();
+        }
+        return null;
+      }
+
+      if (!this.started) {
+        this.started = true;
+        this._framesSinceInit = 0;
+      }
+
+      try {
+        if (typeof this.clm.track === 'function') {
+          this.clm.track(target);
+          this._framesSinceInit += 1;
+        }
+      } catch (error) {
+        debugLog('clmtrackr-track-error', { error: error?.message || String(error) });
+        return null;
+      }
+
+      let positions = null;
+      try {
+        positions = this.clm.getCurrentPosition ? this.clm.getCurrentPosition() : null;
+      } catch (error) {
+        debugLog('clmtrackr-getPositions-error', { error: error?.message || String(error) });
+      }
+
+      const hasPoints = Array.isArray(positions) && positions.length >= 32;
+      const now = performance.now();
+
+      if (hasPoints) {
+        this._lostSince = null;
+        this.lastLandmarksAt = now;
+        return positions;
+      }
+
+      if (!this._lostSince) {
+        this._lostSince = now;
+      }
+
+      const lostMs = now - this._lostSince;
+      if (lostMs > 600 && lostMs < 1500) {
+        if (!this._lastResetAt || (now - this._lastResetAt) > 500) {
+          try {
+            this.clm.reset?.();
+            this.positionsArray = null;
+          } catch (error) {
+            debugLog('clmtrackr-reset-warning', { error: error?.message || String(error) });
+          } finally {
+            this._lastResetAt = now;
+          }
+        }
+      } else if (lostMs >= 1500 && !this._webglRetried) {
+        try {
+          this._webglRetried = true;
+          const newParams = Object.assign({ useWebGL: false }, wg.params?.clmParams || {});
+          this.clm.stop?.();
+          this.clm.reset?.();
+          this.clm = new window.clm.tracker(newParams);
+          const model = window.pModel || (window.clm && window.clm.models && window.clm.models.faceModel);
+          this.clm.init(model);
+          this.createKalmanFilters();
+          this.positionsArray = null;
+          this._framesSinceInit = 0;
+          this._lostSince = null;
+          this.started = false;
+          this._lastResetAt = 0;
+          this.lastLandmarksAt = 0;
+        } catch (error) {
+          debugLog('clmtrackr-webgl-fallback-error', { error: error?.message || String(error) });
+        }
+      }
+
+      return null;
+    };
+
+    ClmTrackrAdapter.prototype.getHealth = function() {
+      const now = performance.now();
+      const lastAt = this.lastLandmarksAt || 0;
+      const frames = this._framesSinceInit || 0;
+      const lostMs = this._lostSince ? (now - this._lostSince) : 0;
+      const points = Array.isArray(this.positionsArray) ? this.positionsArray.length : 0;
+      return {
+        recent: Boolean(lastAt && (now - lastAt) < 1600),
+        lastAt,
+        lostMs,
+        frames,
+        points,
+        webglRetried: Boolean(this._webglRetried)
+      };
+    };
+
+    ClmTrackrAdapter.prototype.getEyePatches = function(imageCanvas, width, height) {
+      if (!imageCanvas || imageCanvas.width === 0) {
+        return null;
+      }
+      const positions = this.trackFrame(imageCanvas);
+      if (!positions || positions.length < 32) {
+        const overlay = document.getElementById('webgazerFaceOverlay');
+        if (overlay && overlay.getContext) {
+          const ctx = overlay.getContext('2d');
+          if (ctx) {
+            ctx.clearRect(0, 0, overlay.width || 0, overlay.height || 0);
+          }
+          overlay.style.opacity = '0.35';
+        }
+        return false;
+      }
+
+      this.positionsArray = positions;
+
+      try {
+        const overlay = document.getElementById('webgazerFaceOverlay');
+        if (overlay && overlay.getContext) {
+          const sourceInfo = _resolveTrackTarget(imageCanvas);
+          const overlayWidth = sourceInfo.width || imageCanvas.width || overlay.width || 0;
+          const overlayHeight = sourceInfo.height || imageCanvas.height || overlay.height || 0;
+          if (overlayWidth > 0 && overlayHeight > 0) {
+            overlay.width = overlayWidth;
+            overlay.height = overlayHeight;
+            const overlayCtx = overlay.getContext('2d', { willReadFrequently: true });
+            if (overlayCtx) {
+              overlayCtx.clearRect(0, 0, overlayWidth, overlayHeight);
+              this.drawFaceOverlay(overlayCtx, positions);
+              Object.assign(overlay.style, {
+                position: 'fixed',
+                top: '16px',
+                left: '16px',
+                opacity: '1',
+                pointerEvents: 'none',
+                zIndex: '2147483631'
+              });
+            }
+          }
+        }
+      } catch (_error) {
+        // overlay drawing failures are non-fatal during diagnostics
+      }
+
+      let leftOriginX = positions[23][0];
+      let leftOriginY = positions[24][1];
+      let leftWidth = positions[25][0] - positions[23][0];
+      let leftHeight = positions[26][1] - positions[24][1];
+      let rightOriginX = positions[30][0];
+      let rightOriginY = positions[29][1];
+      let rightWidth = positions[28][0] - positions[30][0];
+      let rightHeight = positions[31][1] - positions[29][1];
+
+      if (this.applyKalman && this.leftKalman && this.rightKalman) {
+        const leftBox = this.leftKalman.update([leftOriginX, leftOriginY, leftOriginX + leftWidth, leftOriginY + leftHeight]);
+        const rightBox = this.rightKalman.update([rightOriginX, rightOriginY, rightOriginX + rightWidth, rightOriginY + rightHeight]);
+        leftOriginX = leftBox[0];
+        leftOriginY = leftBox[1];
+        leftWidth = leftBox[2] - leftBox[0];
+        leftHeight = leftBox[3] - leftBox[1];
+        rightOriginX = rightBox[0];
+        rightOriginY = rightBox[1];
+        rightWidth = rightBox[2] - rightBox[0];
+        rightHeight = rightBox[3] - rightBox[1];
+      }
+
+      const leftRect = clampRect(leftOriginX, leftOriginY, leftWidth, leftHeight, imageCanvas.width, imageCanvas.height);
+      const rightRect = clampRect(rightOriginX, rightOriginY, rightWidth, rightHeight, imageCanvas.width, imageCanvas.height);
+      leftRect.x = Math.round(leftRect.x);
+      leftRect.y = Math.round(leftRect.y);
+      leftRect.width = Math.max(1, Math.round(leftRect.width));
+      leftRect.height = Math.max(1, Math.round(leftRect.height));
+      rightRect.x = Math.round(rightRect.x);
+      rightRect.y = Math.round(rightRect.y);
+      rightRect.width = Math.max(1, Math.round(rightRect.width));
+      rightRect.height = Math.max(1, Math.round(rightRect.height));
+
+      if (leftRect.width <= 0 || rightRect.width <= 0 || leftRect.height <= 0 || rightRect.height <= 0) {
+        debugLog('clmtrackr-eye-rect-invalid', { left: leftRect, right: rightRect });
+        return null;
+      }
+
+      const ctx = imageCanvas.getContext('2d', { willReadFrequently: true });
+      const leftImageData = ctx.getImageData(leftRect.x, leftRect.y, leftRect.width, leftRect.height);
+      const rightImageData = ctx.getImageData(rightRect.x, rightRect.y, rightRect.width, rightRect.height);
+
+      return {
+        left: {
+          patch: leftImageData,
+          imagex: leftRect.x,
+          imagey: leftRect.y,
+          width: leftRect.width,
+          height: leftRect.height,
+          blink: false
+        },
+        right: {
+          patch: rightImageData,
+          imagex: rightRect.x,
+          imagey: rightRect.y,
+          width: rightRect.width,
+          height: rightRect.height,
+          blink: false
+        },
+        positions: positions
+      };
+    };
+
+    ClmTrackrAdapter.prototype.getPositions = function() {
+      if (!this.clm) return null;
+      try {
+        return this.clm.getCurrentPosition?.() || this.positionsArray;
+      } catch (error) {
+        debugLog('clmtrackr-getPositions-error', { error: error?.message || String(error) });
+        return this.positionsArray;
+      }
+    };
+
+    ClmTrackrAdapter.prototype.reset = function() {
+      if (this.clm?.reset) {
+        try {
+          this.clm.reset();
+        } catch (error) {
+          debugLog('clmtrackr-reset-error', { error: error?.message || String(error) });
+        }
+      }
+      if (this.clm?.stop) {
+        try {
+          this.clm.stop();
+        } catch (error) {
+          debugLog('clmtrackr-stop-error', { error: error?.message || String(error) });
+        }
+      }
+      this.positionsArray = null;
+      this.started = false;
+      this._lostSince = null;
+      this._framesSinceInit = 0;
+      this._webglRetried = false;
+      this._lastResetAt = 0;
+      this.lastLandmarksAt = 0;
+      this.createKalmanFilters();
+    };
+
+    ClmTrackrAdapter.prototype.drawFaceOverlay = function(ctx, keypoints) {
+      const points = keypoints || this.getPositions();
+      if (!ctx || !points) return;
+      ctx.fillStyle = '#10b981';
+      ctx.strokeStyle = '#10b981';
+      ctx.lineWidth = 0.75;
+      for (let i = 0; i < points.length; i += 1) {
+        const [x, y] = points[i];
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        ctx.beginPath();
+        ctx.arc(x, y, 1.2, 0, 2 * Math.PI);
+        ctx.closePath();
+        ctx.fill();
+      }
+    };
+
+    ClmTrackrAdapter.prototype.name = 'clmtrackr';
+
+    wg.tracker = wg.tracker || {};
+    wg.tracker.ClmTrackr = ClmTrackrAdapter;
+    try {
+      wg.addTrackerModule('clmtrackr', ClmTrackrAdapter);
+      clmTrackerModuleReady = true;
+      debugLog('tracker-module-registered', { tracker: 'clmtrackr' });
+    } catch (error) {
+      debugLog('clmtracker-register-failed', { error: error?.message || String(error) });
+    }
+  }
+
   function handleGazePrediction(data /*, timestamp */) {
     if (!data) {
       updateCustomGazeIndicator(null);
       return;
     }
 
+    const poseMeasurement = extractHeadPose();
+    updatePoseState(poseMeasurement);
+
     const rawPoint = { x: data.x, y: data.y };
     captureCalibrationSample(rawPoint);
 
     const calibrated = applyCalibrationTransform(rawPoint);
-    updateCustomGazeIndicator(calibrated);
+    const smoothedPoint = smoothCalibratedPoint(calibrated);
+    updateCustomGazeIndicator(smoothedPoint);
+
+    // Always accumulate samples so the stability window can become "ready"
+    addPredictionSample(smoothedPoint);
 
     if (state.calibrationMode) {
       return;
     }
-
     if (!state.hoverActive) {
       return;
     }
 
-    const threshold = state.customDwell || DWELL_THRESHOLD_MS;
-    addPredictionSample(calibrated);
+    const stability = computeStability();
+    const unstable = !stability.ready || !stability.stable;
+    const inHardWarmup = performance.now() < (state.stability.hardGateUntil || 0);
+
+    if (unstable) {
+      hideTooltip();
+      if (state.dwellAnchor) {
+        clearHighlight(state.dwellAnchor);
+        state.dwellAnchor = null;
+      }
+      state.dwellStart = 0;
+    }
+    // During the brief hard warmup we still skip dwell triggers,
+    // BUT we do not starve the buffer anymore (we already added the sample).
+    if (unstable && inHardWarmup) {
+      return;
+    }
+    if (unstable) {
+      return;
+    }
+
+    let threshold = state.customDwell || DWELL_THRESHOLD_MS;
+    if (stability.ready && stability.thresholds) {
+      const maxStdPx = Math.max(1, stability.thresholds.maxStdPx || 1);
+      const jitterRatio = Math.min(1, (stability.stdX + stability.stdY) / (2 * maxStdPx));
+      threshold = Math.round(threshold * (1 + 0.5 * jitterRatio));
+    }
     const { anchor, centroid } = resolveDominantAnchor();
 
     if (anchor !== state.dwellAnchor) {
@@ -623,6 +1588,9 @@
       <div class="webgazer-note">Hold your gaze to keep streaming this link.</div>
     `;
     showTooltip(contentHtml, anchor);
+    if (!state.calibrationMode) {
+      requestRefinementCapture(anchor);
+    }
 
     const runtimeApi = globalThis.chrome && globalThis.chrome.runtime;
     if (!runtimeApi || typeof runtimeApi.sendMessage !== 'function') {
@@ -687,20 +1655,20 @@
       { x: 90, y: 90 }
     ];
 
-    const finePositions = [
-      { x: 20, y: 20 },
-      { x: 50, y: 18 },
-      { x: 80, y: 20 },
-      { x: 20, y: 50 },
-      { x: 80, y: 50 },
-      { x: 20, y: 80 },
-      { x: 50, y: 82 },
-      { x: 80, y: 80 },
-      { x: 35, y: 35 },
-      { x: 65, y: 35 },
-      { x: 35, y: 65 },
-      { x: 65, y: 65 }
-    ];
+  const finePositions = [
+    { x: 20, y: 20 },
+    { x: 50, y: 18 },
+    { x: 80, y: 20 },
+    { x: 20, y: 50 },
+    { x: 80, y: 50 },
+    { x: 20, y: 80 },
+    { x: 50, y: 82 },
+    { x: 80, y: 80 },
+    { x: 35, y: 35 },
+    { x: 65, y: 35 },
+    { x: 35, y: 65 },
+    { x: 65, y: 65 }
+  ];
 
     const positions = stage === 'primary' ? primaryPositions : finePositions;
     state.calibrationConfig.clicksPerPoint = stage === 'primary' ? 3 : 2;
@@ -754,18 +1722,25 @@
     }
   }
 
-  function handleCalibrationClick(event, point) {
+function handleCalibrationClick(event, point) {
     event.preventDefault();
-    event.stopPropagation();
     const gaze = window.webgazer;
     if (!gaze) return;
 
     const x = event.clientX;
     const y = event.clientY;
     const rect = point.getBoundingClientRect();
-    const targetX = rect.left + rect.width / 2;
-    const targetY = rect.top + rect.height / 2;
-    beginCalibrationCapture(targetX, targetY);
+      const targetX = rect.left + rect.width / 2;
+      const targetY = rect.top + rect.height / 2;
+      beginCalibrationCapture(targetX, targetY, 'calibration');
+
+      try {
+        if (typeof gaze.recordScreenPosition === 'function') {
+          gaze.recordScreenPosition(targetX, targetY, 'click');
+        }
+      } catch (error) {
+        debugLog('record-screen-position-error', { error: error?.message || String(error) });
+      }
 
     const currentCount = state.calibrationConfig.counts.get(point) || 0;
     const nextCount = currentCount + 1;
@@ -786,16 +1761,67 @@
       state.calibrationConfig.completed = true;
       if (state.calibrationConfig.stage === 'primary') {
         state.calibrationConfig.primaryComplete = true;
-        updateStatus('Baseline calibration complete! Run fine-tune calibration or begin gaze hover.', STATUS_OK);
+        finalizeCalibrationCapture();
+        clearPoseBaselineMonitor();
         if (controls.refineBtn) controls.refineBtn.disabled = false;
-        if (controls.beginBtn) controls.beginBtn.disabled = false;
+        if (state.pose.baseline.ready) {
+          updateStatus('Baseline calibration complete! When ready, click “Run Pose Calibration” to align head movement.', STATUS_OK);
+          if (controls.poseBtn) {
+            controls.poseBtn.disabled = false;
+            controls.poseBtn.focus({ preventScroll: true });
+          }
+        } else {
+          updateStatus('Baseline calibration complete! Hold centered while we stabilise your neutral pose…', STATUS_OK);
+          const base = state.pose.baseline;
+          const initialProgress = base ? Math.min(100, (base.count / POSE_BASELINE_TARGET) * 100) : 0;
+          updatePoseBaselineProgressDisplay(initialProgress);
+          state.poseBaselineMonitorStartedAt = performance.now();
+          state.poseBaselineReadyMonitor = setInterval(() => {
+            const base = state.pose.baseline;
+            if (!base) return;
+            if (base.ready) {
+              clearPoseBaselineMonitor();
+              updateStatus('Neutral pose locked in! When ready, click “Run Pose Calibration”.', STATUS_OK);
+              if (controls.poseBtn) {
+                controls.poseBtn.disabled = false;
+                controls.poseBtn.focus({ preventScroll: true });
+              }
+              if (controls.refineBtn) controls.refineBtn.disabled = false;
+              debugLog('pose-baseline-ready', { count: base.count });
+              return;
+            }
+            const progress = Math.min(100, (base.count / POSE_BASELINE_TARGET) * 100);
+            updatePoseBaselineProgressDisplay(progress);
+            updateStatus(`Baseline calibration complete! Stabilising head pose… ${Math.round(progress)}%`, STATUS_OK);
+            debugLog('pose-baseline-progress', { count: base.count, progress, tracker: window.webgazer?.getTracker?.()?.clm ? 'clmtrackr' : window.webgazer?.getTracker?.()?.name || 'unknown' });
+            if (!state.poseBaselineFallbackTriggered && base.count === 0 && state.poseBaselineMonitorStartedAt && (performance.now() - state.poseBaselineMonitorStartedAt) > POSE_BASELINE_FALLBACK_MS) {
+              base.ready = true;
+              base.count = POSE_BASELINE_MIN_FRAMES;
+              base.yaw = 0;
+              base.pitch = 0;
+              base.roll = 0;
+              markPoseBaselineUnavailable();
+              clearPoseBaselineMonitor();
+              updateStatus('Head pose landmarks unavailable — proceeding with a neutral pose baseline.', STATUS_WARN);
+              debugLog('pose-baseline-fallback', { tracker: window.webgazer?.getCurrentTracker?.() || window.webgazer?.getTracker?.()?.name });
+              if (controls.poseBtn) {
+                controls.poseBtn.disabled = false;
+                controls.poseBtn.focus({ preventScroll: true });
+              }
+              if (controls.refineBtn) controls.refineBtn.disabled = false;
+            }
+          }, 180);
+        }
+        state.indicatorAlwaysOn = true;
+        updateCustomGazeIndicator(state.smoothing.smoothed || null);
+        return;
       } else {
         updateStatus('Fine-tune calibration complete! Begin gaze hover when ready.', STATUS_OK);
         if (controls.beginBtn) controls.beginBtn.disabled = false;
         if (controls.refineBtn) controls.refineBtn.disabled = true;
+        finalizeCalibrationCapture();
+        teardownCalibrationTargets();
       }
-      finalizeCalibrationCapture();
-      teardownCalibrationTargets();
     } else {
       updateStatus(`Calibration in progress… ${remaining} dots remaining.`, STATUS_OK);
     }
@@ -942,15 +1968,17 @@
       if (api?.onMessage && state.runtimeListener) {
         api.onMessage.removeListener(state.runtimeListener);
       }
-      cleanupWebGazer();
+      cleanupWebGazer({ hard: true });
     });
   }
 
-  function cleanupWebGazer() {
+  function cleanupWebGazer(options = { hard: false }) {
     if (window.webgazer) {
       try {
         window.webgazer.pause();
-        window.webgazer.end();
+        if (options.hard && typeof window.webgazer.end === 'function') {
+          window.webgazer.end();
+        }
       } catch (error) {
         console.warn('[WebGazer Prototype] Failed to stop WebGazer:', error);
       }
@@ -962,16 +1990,47 @@
     }
     state.webgazerReady = false;
     state.predictionBuffer = [];
+    state.stability.hardGateUntil = 0;
+    state.stability.stable = false;
+    state.stability.stableSince = null;
+    state.stability.unstableSince = null;
+    if (state.trackerFallbackTimer) {
+      clearInterval(state.trackerFallbackTimer);
+      state.trackerFallbackTimer = null;
+    }
+    if (state.trackerFallbackDelay) {
+      clearTimeout(state.trackerFallbackDelay);
+      state.trackerFallbackDelay = null;
+    }
     updateCustomGazeIndicator(null);
     finalizeCalibrationCapture(true);
+    clearPoseBaselineMonitor();
+    state.calibrationConfig.stage = 'primary';
     state.calibrationSamples = [];
     state.calibrationTransform = {
       matrix: [
-        [1, 0, 0],
-        [0, 1, 0]
+        [1, 0, 0, 0, 0],
+        [0, 1, 0, 0, 0]
       ],
       ready: false
     };
+    state.smoothing = {
+      history: [],
+      smoothed: null,
+      pendingJump: null
+    };
+    state.euro = null;
+    state.stability.lastRecomputeAt = 0;
+    state.pose.baseline = { yaw: 0, pitch: 0, roll: 0, count: 0, ready: false };
+    state.pose.smoothed = null;
+    state.poseTierIndex = 0;
+    state.poseTierActive = false;
+    if (state.poseTierTimer) {
+      clearTimeout(state.poseTierTimer);
+      state.poseTierTimer = null;
+    }
+    state.lastRefinementAt = 0;
+    teardownCalibrationTargets();
   }
 
   async function waitForWebgazerDomElements(timeoutMs = 2500) {
@@ -990,18 +2049,39 @@
   }
 
   function ensureWebgazerSupportCanvases() {
+    let container = document.getElementById('webgazerVideoContainer');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'webgazerVideoContainer';
+      document.body.appendChild(container);
+    }
+    Object.assign(container.style, {
+      position: 'fixed',
+      top: '16px',
+      left: '16px',
+      width: '320px',
+      height: '240px',
+      opacity: '1',
+      pointerEvents: 'none',
+      zIndex: '2147483630'
+    });
+
     let videoCanvas = document.getElementById('webgazerVideoCanvas');
     if (!videoCanvas) {
       videoCanvas = document.createElement('canvas');
       videoCanvas.id = 'webgazerVideoCanvas';
       videoCanvas.width = 320;
       videoCanvas.height = 240;
-      videoCanvas.style.position = 'fixed';
-      videoCanvas.style.top = '-9999px';
-      videoCanvas.style.left = '-9999px';
-      videoCanvas.style.opacity = '0';
       document.body.appendChild(videoCanvas);
     }
+    Object.assign(videoCanvas.style, {
+      position: 'fixed',
+      top: '16px',
+      left: '16px',
+      opacity: '1',
+      pointerEvents: 'none',
+      zIndex: '2147483629'
+    });
     let heatmapCanvas = document.getElementById('webgazerHeatmap');
     if (!heatmapCanvas) {
       heatmapCanvas = document.createElement('canvas');
@@ -1014,6 +2094,57 @@
       heatmapCanvas.style.opacity = '0';
       document.body.appendChild(heatmapCanvas);
     }
+
+    let faceOverlay = document.getElementById('webgazerFaceOverlay');
+    if (!faceOverlay) {
+      faceOverlay = document.createElement('canvas');
+      faceOverlay.id = 'webgazerFaceOverlay';
+      faceOverlay.width = 320;
+      faceOverlay.height = 240;
+      document.body.appendChild(faceOverlay);
+    }
+    Object.assign(faceOverlay.style, {
+      position: 'fixed',
+      top: '16px',
+      left: '16px',
+      opacity: '1',
+      pointerEvents: 'none',
+      zIndex: '2147483631'
+    });
+
+    let faceFeedback = document.getElementById('webgazerFaceFeedbackBox');
+    if (!faceFeedback) {
+      faceFeedback = document.createElement('div');
+      faceFeedback.id = 'webgazerFaceFeedbackBox';
+      document.body.appendChild(faceFeedback);
+    }
+    Object.assign(faceFeedback.style, {
+      position: 'fixed',
+      top: '16px',
+      left: '16px',
+      width: '320px',
+      height: '240px',
+      opacity: '1',
+      pointerEvents: 'none',
+      zIndex: '2147483631'
+    });
+
+    const videoFeed = document.getElementById('webgazerVideoFeed');
+    if (videoFeed) {
+      Object.assign(videoFeed.style, {
+        position: 'fixed',
+        top: '16px',
+        left: '16px',
+        width: videoFeed.videoWidth ? `${videoFeed.videoWidth}px` : '320px',
+        height: videoFeed.videoHeight ? `${videoFeed.videoHeight}px` : '240px',
+        opacity: '1',
+        pointerEvents: 'none',
+        zIndex: '2147483632'
+      });
+    }
+
+    // Mirror WebGazer defaults so internal cleanup succeeds.
+    window.webgazer?.params && (window.webgazer.params.showVideoPreview = false);
   }
 
   function sendRuntimeMessage(payload) {
@@ -1049,6 +2180,10 @@
     if (!state.statusEl) return;
     state.statusEl.textContent = message;
     state.statusEl.style.color = color || '#0f172a';
+    if (message !== state.lastStatusMessage) {
+      debugLog('status', { message, tone: color || 'default' });
+      state.lastStatusMessage = message;
+    }
   }
 
   function ensureCustomGazeIndicator() {
@@ -1073,16 +2208,45 @@
     return state.customGazeDot;
   }
 
-  function updateCustomGazeIndicator(sample) {
-    const dot = ensureCustomGazeIndicator();
-    if (!sample || !Number.isFinite(sample.x) || !Number.isFinite(sample.y) || !state.calibrationMode) {
-      dot.style.display = 'none';
-      return;
-    }
-    dot.style.left = `${sample.x}px`;
-    dot.style.top = `${sample.y}px`;
-    dot.style.display = 'block';
+function updateCustomGazeIndicator(sample) {
+  const dot = ensureCustomGazeIndicator();
+  const shouldShow =
+    state.calibrationMode ||
+    state.poseTierActive ||
+    state.poseTierCapturing ||
+    state.hoverActive ||
+    state.indicatorAlwaysOn;
+
+  let point = sample;
+  if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+    point = state.smoothing.smoothed || null;
   }
+
+  if (!shouldShow || !point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+    dot.style.display = 'none';
+    return;
+  }
+
+  if (state.calibrationMode || state.poseTierActive || state.poseTierCapturing) {
+    dot.style.background = 'rgba(239, 68, 68, 0.95)';
+    dot.style.border = '2px solid #b91c1c';
+    dot.style.boxShadow = '0 0 8px rgba(239, 68, 68, 0.55)';
+    dot.style.opacity = '1';
+    dot.style.width = '18px';
+    dot.style.height = '18px';
+  } else {
+    dot.style.background = 'rgba(37, 99, 235, 0.65)';
+    dot.style.border = '1px solid rgba(30, 64, 175, 0.9)';
+    dot.style.boxShadow = '0 0 6px rgba(37, 99, 235, 0.45)';
+    dot.style.opacity = '0.85';
+    dot.style.width = '14px';
+    dot.style.height = '14px';
+  }
+
+  dot.style.left = `${point.x}px`;
+  dot.style.top = `${point.y}px`;
+  dot.style.display = 'block';
+}
   function addPredictionSample(sample) {
     const now = performance.now();
     state.predictionBuffer.push({
@@ -1096,6 +2260,71 @@
     while (state.predictionBuffer.length && (now - state.predictionBuffer[0].t) > PREDICTION_BUFFER_WINDOW_MS) {
       state.predictionBuffer.shift();
     }
+  }
+
+  function computeStability() {
+    const now = performance.now();
+    const buffer = state.predictionBuffer.filter((sample) => now - sample.t <= STABILITY_WINDOW_MS);
+    const n = buffer.length;
+    if (n < STABILITY_MIN_SAMPLES) {
+      return { ready: false, stable: false, stdX: Infinity, stdY: Infinity, speed: Infinity };
+    }
+
+    const xs = buffer.map((sample) => sample.x).sort((a, b) => a - b);
+    const ys = buffer.map((sample) => sample.y).sort((a, b) => a - b);
+    const med = (arr) => arr[Math.floor(arr.length / 2)] ?? 0;
+    const medX = med(xs);
+    const medY = med(ys);
+    const mad = (arr, midpoint) => med(arr.map((value) => Math.abs(value - midpoint)));
+    const stdX = 1.4826 * mad(xs, medX);
+    const stdY = 1.4826 * mad(ys, medY);
+
+    const speeds = [];
+    for (let i = 1; i < n; i += 1) {
+      const dx = buffer[i].x - buffer[i - 1].x;
+      const dy = buffer[i].y - buffer[i - 1].y;
+      const dt = Math.max(0.001, (buffer[i].t - buffer[i - 1].t) / 1000);
+      speeds.push(Math.hypot(dx, dy) / dt);
+    }
+    speeds.sort((a, b) => a - b);
+    const trim = Math.max(0, Math.floor(speeds.length * 0.1));
+    const upperBound = Math.max(trim, speeds.length - trim);
+    const trimmed = speeds.slice(trim, upperBound);
+    const speed = trimmed.length ? trimmed.reduce((acc, value) => acc + value, 0) / trimmed.length : 0;
+
+    const diag = Math.hypot(window.innerWidth || 0, window.innerHeight || 0) || 2000;
+    const calibrationCount = state.calibrationSamples ? state.calibrationSamples.length : 0;
+    const relStd = calibrationCount < 12 ? 0.08 : calibrationCount < 24 ? 0.06 : 0.05;
+    const maxStdPx = Math.max(60, diag * relStd);
+    const maxSpeed = Math.max(6000, diag * 8);
+
+    const stableNow = stdX <= maxStdPx && stdY <= maxStdPx && speed <= maxSpeed;
+    if (stableNow) {
+      if (!state.stability.stableSince) {
+        state.stability.stableSince = now;
+      }
+      state.stability.unstableSince = null;
+      if (!state.stability.stable && (now - state.stability.stableSince) >= 250) {
+        state.stability.stable = true;
+      }
+    } else {
+      state.stability.stableSince = null;
+      if (!state.stability.unstableSince) {
+        state.stability.unstableSince = now;
+      }
+      if (state.stability.stable && (now - state.stability.unstableSince) >= 600) {
+        state.stability.stable = false;
+      }
+    }
+
+    return {
+      ready: true,
+      stable: state.stability.stable,
+      stdX,
+      stdY,
+      speed,
+      thresholds: { maxStdPx, maxSpeed }
+    };
   }
 
   function resolveDominantAnchor() {
@@ -1162,7 +2391,228 @@
     );
   }
 
-  function beginCalibrationCapture(targetX, targetY) {
+  function smoothCalibratedPoint(point) {
+    const history = state.smoothing.history;
+    history.push({ x: point.x, y: point.y });
+    if (history.length > SMOOTHING_WINDOW) {
+      history.shift();
+    }
+
+    const medianPoint = {
+      x: median(history.map((sample) => sample.x)),
+      y: median(history.map((sample) => sample.y))
+    };
+
+    const previous = state.smoothing.smoothed;
+    const distanceFromPrevious = previous ? distanceBetween(previous, medianPoint) : 0;
+
+    if (previous && distanceFromPrevious > MAX_JUMP_DISTANCE) {
+      const pending = state.smoothing.pendingJump;
+      if (pending && distanceBetween(pending.point, medianPoint) < MAX_JUMP_DISTANCE * 0.4) {
+        pending.count += 1;
+      } else {
+        state.smoothing.pendingJump = { point: medianPoint, count: 1 };
+      }
+      if (!state.smoothing.pendingJump || state.smoothing.pendingJump.count < 2) {
+        return previous;
+      }
+      state.smoothing.pendingJump = null;
+    } else {
+      state.smoothing.pendingJump = null;
+    }
+
+    const speed = distanceFromPrevious;
+    const alpha = computeAdaptiveAlpha(speed);
+    const blended = previous
+      ? {
+          x: previous.x + alpha * (medianPoint.x - previous.x),
+          y: previous.y + alpha * (medianPoint.y - previous.y)
+        }
+      : medianPoint;
+
+    const euroOut = state.euro ? state.euro.filter({ x: blended.x, y: blended.y }) : blended;
+    const smoothed = {
+      x: clamp(euroOut.x, 0, window.innerWidth),
+      y: clamp(euroOut.y, 0, window.innerHeight)
+    };
+
+    state.smoothing.smoothed = smoothed;
+    return smoothed;
+  }
+
+  function computeAdaptiveAlpha(speed) {
+    const minAlpha = 0.18;
+    const maxAlpha = 0.45;
+    const lowSpeed = 8;
+    const highSpeed = 80;
+    if (speed <= lowSpeed) return minAlpha;
+    if (speed >= highSpeed) return maxAlpha;
+    const ratio = (speed - lowSpeed) / (highSpeed - lowSpeed);
+    return minAlpha + ratio * (maxAlpha - minAlpha);
+  }
+
+  function distanceBetween(a, b) {
+    const dx = a.x - b.x;
+    const dy = a.y - b.y;
+    return Math.hypot(dx, dy);
+  }
+
+  function median(values) {
+    if (!values.length) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    if (sorted.length % 2 === 0) {
+      return (sorted[mid - 1] + sorted[mid]) / 2;
+    }
+    return sorted[mid];
+  }
+
+  function extractHeadPose() {
+    try {
+      const tracker = window.webgazer?.getTracker?.();
+      const clm = tracker?.clm;
+      if (!clm || typeof clm.getCurrentPosition !== 'function') {
+        return null;
+      }
+      const positions = clm.getCurrentPosition();
+      if (!positions || positions.length < 55) {
+        return null;
+      }
+
+      const leftEye = positions[27] || positions[23];
+      const rightEye = positions[32] || positions[28];
+      const noseTip = positions[62] || positions[33];
+      const chin = positions[7] || positions[14];
+      if (!leftEye || !rightEye || !noseTip) {
+        return null;
+      }
+
+      const eyeVector = {
+        x: rightEye[0] - leftEye[0],
+        y: rightEye[1] - leftEye[1]
+      };
+      const eyeDistance = Math.hypot(eyeVector.x, eyeVector.y);
+      if (!Number.isFinite(eyeDistance) || eyeDistance < 1) {
+        return null;
+      }
+
+      const eyeCenter = {
+        x: (leftEye[0] + rightEye[0]) / 2,
+        y: (leftEye[1] + rightEye[1]) / 2
+      };
+
+      const roll = Math.atan2(eyeVector.y, eyeVector.x);
+      const yaw = clamp((noseTip[0] - eyeCenter.x) / eyeDistance, -0.7, 0.7);
+      let pitch = (noseTip[1] - eyeCenter.y) / eyeDistance;
+      if (chin) {
+        pitch -= (chin[1] - eyeCenter.y) / (2 * eyeDistance);
+      }
+      pitch = clamp(pitch, -0.7, 0.7);
+
+      const confidence = Math.min(1, positions.length / 70);
+      return {
+        yaw,
+        pitch,
+        roll,
+        confidence
+      };
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function updatePoseState(measurement) {
+    const now = performance.now();
+    if (!measurement || measurement.confidence < POSE_CONFIDENCE_THRESHOLD) {
+      const missingCooldownMs = 15000;
+      const sinceLog = now - state.poseDebug.lastMissingLog;
+      if (!state.poseDebug.missingActive || sinceLog > missingCooldownMs) {
+        debugLog('pose-measurement-missing', {
+          confidence: measurement?.confidence || 0,
+          repeated: state.poseDebug.missingActive
+        });
+        state.poseDebug.lastMissingLog = now;
+        state.poseDebug.missingActive = true;
+      }
+      return;
+    }
+    state.poseDebug.missingActive = false;
+    state.poseDebug.lastMissingLog = 0;
+    const poseState = state.pose;
+
+    if (poseState.smoothed == null) {
+      poseState.smoothed = { yaw: measurement.yaw, pitch: measurement.pitch, roll: measurement.roll };
+    } else {
+      poseState.smoothed.yaw += POSE_SMOOTH_ALPHA * (measurement.yaw - poseState.smoothed.yaw);
+      poseState.smoothed.pitch += POSE_SMOOTH_ALPHA * (measurement.pitch - poseState.smoothed.pitch);
+      poseState.smoothed.roll += POSE_SMOOTH_ALPHA * (measurement.roll - poseState.smoothed.roll);
+    }
+    maybeWarmPoseBaseline();
+  }
+
+  function maybeWarmPoseBaseline() {
+    const poseState = state.pose;
+    const baseline = poseState.baseline;
+    const smoothed = poseState.smoothed;
+    if (!baseline || baseline.ready || !smoothed) {
+      return;
+    }
+
+    const stage = state.calibrationConfig.stage;
+    const inPrimaryStage = state.calibrationMode && stage === 'primary';
+    if (inPrimaryStage) {
+      accumulatePoseBaseline(baseline, smoothed, false);
+      return;
+    }
+
+    if (!state.calibrationConfig.primaryComplete) {
+      return;
+    }
+
+    const neutral = isPoseNearNeutral(smoothed);
+    const inCalibrationWindow = state.calibrationMode && (stage === 'primary' || stage === 'fine' || stage === 'pose');
+    const poseActive = state.poseTierActive || state.poseTierCapturing;
+
+    if (inCalibrationWindow && !poseActive && neutral) {
+      accumulatePoseBaseline(baseline, smoothed, true);
+      return;
+    }
+
+    if (!state.calibrationMode && !poseActive && neutral) {
+      accumulatePoseBaseline(baseline, smoothed, true);
+    }
+  }
+
+  function accumulatePoseBaseline(baseline, poseSample, allowEarlyReady) {
+    const nextCount = (baseline.count || 0) + 1;
+    baseline.count = nextCount;
+    baseline.yaw += (poseSample.yaw - baseline.yaw) / nextCount;
+    baseline.pitch += (poseSample.pitch - baseline.pitch) / nextCount;
+    baseline.roll += (poseSample.roll - baseline.roll) / nextCount;
+    if (nextCount >= POSE_BASELINE_TARGET) {
+      baseline.ready = true;
+    } else if (allowEarlyReady && nextCount >= POSE_BASELINE_MIN_FRAMES) {
+      baseline.ready = true;
+    }
+  }
+
+  function isPoseNearNeutral(poseSample) {
+    if (!poseSample) return false;
+    return Math.abs(poseSample.yaw) <= POSE_NEUTRAL_TOLERANCE && Math.abs(poseSample.pitch) <= POSE_NEUTRAL_TOLERANCE;
+  }
+
+  function getPoseDelta() {
+    const base = state.pose.baseline;
+    if (!base || !base.ready || !state.pose.smoothed) {
+      return { yaw: 0, pitch: 0 };
+    }
+    return {
+      yaw: clamp(state.pose.smoothed.yaw - base.yaw, -0.7, 0.7),
+      pitch: clamp(state.pose.smoothed.pitch - base.pitch, -0.7, 0.7)
+    };
+  }
+
+function beginCalibrationCapture(targetX, targetY, captureType = 'calibration', metadata = {}) {
     if (state.calibrationCapture) {
       const hasSamples = state.calibrationCapture.samples && state.calibrationCapture.samples.length >= 3;
       finalizeCalibrationCapture(!hasSamples);
@@ -1170,18 +2620,507 @@
     const capture = {
       target: { x: targetX, y: targetY },
       samples: [],
-      expires: performance.now() + CALIBRATION_SAMPLE_WINDOW_MS,
+      poseSamples: [],
+      type: captureType,
+      tierId: metadata.tierId || null,
+      onComplete: typeof metadata.onComplete === 'function' ? metadata.onComplete : null,
+      expires: performance.now() + (captureType === 'calibration' ? CALIBRATION_SAMPLE_WINDOW_MS : REFINEMENT_SAMPLE_WINDOW_MS),
       timeoutId: setTimeout(() => {
         finalizeCalibrationCapture();
-      }, CALIBRATION_SAMPLE_WINDOW_MS + 30)
+      }, (captureType === 'calibration' ? CALIBRATION_SAMPLE_WINDOW_MS : REFINEMENT_SAMPLE_WINDOW_MS) + 40)
     };
     state.calibrationCapture = capture;
   }
+
+function requestRefinementCapture(anchor) {
+  if (!anchor || typeof anchor.getBoundingClientRect !== 'function') return;
+  if (state.calibrationMode) return;
+  if (state.poseTierActive || state.poseTierCapturing) return;
+  if (!state.pose.baseline.ready) return;
+  const now = Date.now();
+  if (now - state.lastRefinementAt < 1500) {
+    return;
+  }
+  const rect = anchor.getBoundingClientRect();
+  const poseDelta = getPoseDelta();
+  const poseMagnitude = Math.hypot(poseDelta.yaw, poseDelta.pitch);
+  if (poseMagnitude > 0.45) {
+    return;
+  }
+  const centerX = clamp(rect.left + rect.width / 2, 0, window.innerWidth);
+  const centerY = clamp(rect.top + rect.height / 2, 0, window.innerHeight);
+  beginCalibrationCapture(centerX, centerY, 'refinement');
+}
+
+function startPoseCalibrationSequence() {
+  if (state.poseTierActive) {
+    return;
+  }
+  if (controls.poseBtn) {
+    controls.poseBtn.disabled = true;
+  }
+  clearPoseBaselineMonitor();
+  if (!state.calibrationConfig.primaryComplete) {
+    updateStatus('Complete the baseline calibration first, then run pose calibration.', STATUS_WARN);
+    if (controls.poseBtn) controls.poseBtn.disabled = false;
+    return;
+  }
+  if (!state.pose.baseline.ready) {
+    updateStatus('Still stabilising your neutral pose. Keep centered for another moment, then try again.', STATUS_WARN);
+    if (controls.poseBtn) controls.poseBtn.disabled = false;
+    return;
+  }
+  if (state.poseBaselineFallbackTriggered) {
+    updateStatus('Manual pose capture: follow the cues and hold steady when prompted.', STATUS_WARN);
+    debugLog('pose-calibration-manual', {});
+  } else {
+    debugLog('pose-calibration-start', {});
+  }
+  state.calibrationConfig.stage = 'pose';
+  state.calibrationConfig.completed = false;
+  state.poseTierIndex = 0;
+  state.poseTierActive = false;
+  state.calibrationConfig.points = [];
+  state.calibrationConfig.counts = new Map();
+  state.calibrationMode = true;
+  state.hoverActive = false;
+  state.indicatorAlwaysOn = true;
+  updateCustomGazeIndicator(state.smoothing.smoothed || null);
+  state.poseTierCapturing = false;
+  state.poseTierHoldStart = null;
+  if (state.poseTierTimer) {
+    clearTimeout(state.poseTierTimer);
+    state.poseTierTimer = null;
+  }
+  if (state.poseTierMonitor) {
+    clearInterval(state.poseTierMonitor);
+    state.poseTierMonitor = null;
+  }
+  if (controls.beginBtn) controls.beginBtn.disabled = true;
+  if (controls.refineBtn) controls.refineBtn.disabled = true;
+  renderPoseIntro();
+}
+
+function renderPoseIntro() {
+  teardownCalibrationTargets();
+  const overlay = document.createElement('div');
+  overlay.id = 'webgazer-calibration-overlay';
+  overlay.dataset.kind = 'pose-intro';
+  overlay.style.position = 'fixed';
+  overlay.style.inset = '0';
+  overlay.style.background = 'rgba(37, 99, 235, 0.05)';
+  overlay.style.zIndex = '2147483600';
+  overlay.style.display = 'flex';
+  overlay.style.alignItems = 'center';
+  overlay.style.justifyContent = 'center';
+  overlay.style.pointerEvents = 'auto';
+
+  const panel = document.createElement('div');
+  panel.className = 'pose-intro-panel';
+  panel.style.background = '#fff';
+  panel.style.color = '#0f172a';
+  panel.style.padding = '24px 28px';
+  panel.style.borderRadius = '16px';
+  panel.style.boxShadow = '0 18px 45px rgba(15, 23, 42, 0.25)';
+  panel.style.maxWidth = '440px';
+  panel.style.lineHeight = '1.55';
+  panel.style.textAlign = 'left';
+
+  const title = document.createElement('h3');
+  title.textContent = 'Pose Calibration';
+  title.style.margin = '0 0 12px';
+  title.style.textAlign = 'center';
+  panel.appendChild(title);
+
+  const description = document.createElement('p');
+  description.textContent = 'Keep staring at the center dot. When you continue we will prompt you to rotate your head left, right, up, and down while maintaining gaze.';
+  description.style.margin = '0 0 12px';
+  panel.appendChild(description);
+
+  const steps = document.createElement('ol');
+  steps.style.margin = '0 0 16px 18px';
+  poseTiers.forEach((tier) => {
+    const li = document.createElement('li');
+    li.textContent = tier.instruction;
+    steps.appendChild(li);
+  });
+  panel.appendChild(steps);
+
+  const readyBtn = document.createElement('button');
+  readyBtn.type = 'button';
+  readyBtn.id = 'webgazer-pose-start';
+  readyBtn.textContent = 'I\'m ready — start pose calibration';
+  readyBtn.style.width = '100%';
+  readyBtn.style.padding = '10px 14px';
+  readyBtn.style.fontSize = '0.95rem';
+  readyBtn.style.fontWeight = '600';
+  readyBtn.style.border = 'none';
+  readyBtn.style.borderRadius = '10px';
+  readyBtn.style.cursor = 'pointer';
+  readyBtn.style.background = '#1e3a8a';
+  readyBtn.style.color = '#fff';
+  readyBtn.addEventListener('click', () => {
+    if (state.calibrationOverlay && state.calibrationOverlay.dataset.kind === 'pose-intro') {
+      state.calibrationOverlay.parentElement.removeChild(state.calibrationOverlay);
+      state.calibrationOverlay = null;
+    }
+    runNextPoseTier();
+  });
+  panel.appendChild(readyBtn);
+
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+  state.calibrationOverlay = overlay;
+  updateStatus('Pose calibration: click “I\'m ready” when you are set. Keep your eyes on the center dot throughout.', STATUS_OK);
+}
+
+function runNextPoseTier() {
+  const tier = poseTiers[state.poseTierIndex];
+  if (!tier) {
+    finishPoseCalibrationSequence();
+    return;
+  }
+  if (!state.pose.baseline.ready) {
+    updateStatus('Pose baseline unavailable. Restart the baseline calibration first.', STATUS_WARN);
+    finishPoseCalibrationSequence();
+    return;
+  }
+
+  state.poseTierActive = true;
+  renderPoseOverlay(tier);
+  updateStatus(`Pose calibration ${state.poseTierIndex + 1}/${poseTiers.length}: ${tier.instruction}`, STATUS_OK);
+
+  state.poseTierHoldStart = null;
+  state.poseTierCapturing = false;
+
+  if (state.poseTierTimer) {
+    clearTimeout(state.poseTierTimer);
+    state.poseTierTimer = null;
+  }
+  if (state.poseTierMonitor) {
+    clearInterval(state.poseTierMonitor);
+    state.poseTierMonitor = null;
+  }
+
+  state.poseTierTimer = setTimeout(() => {
+    state.poseTierTimer = null;
+    state.poseTierMonitor = setInterval(() => evaluatePoseTier(tier), 80);
+    evaluatePoseTier(tier);
+  }, POSE_TIER_PREP_MS);
+}
+
+function renderPoseOverlay(tier) {
+  let overlay = state.calibrationOverlay;
+  if (!overlay || (overlay.dataset.kind !== 'pose' && overlay.dataset.kind !== 'pose-intro')) {
+    teardownCalibrationTargets();
+    overlay = null;
+  }
+
+  if (!overlay || overlay.dataset.kind !== 'pose') {
+    overlay = document.createElement('div');
+    overlay.id = 'webgazer-calibration-overlay';
+    overlay.dataset.kind = 'pose';
+    overlay.style.position = 'fixed';
+    overlay.style.inset = '0';
+    overlay.style.background = 'rgba(37, 99, 235, 0.05)';
+    overlay.style.zIndex = '2147483600';
+    overlay.style.display = 'flex';
+    overlay.style.alignItems = 'center';
+    overlay.style.justifyContent = 'center';
+    overlay.style.pointerEvents = 'none';
+
+    const cue = document.createElement('div');
+    cue.className = 'pose-cue';
+    overlay.appendChild(cue);
+
+    const dot = document.createElement('div');
+    dot.id = 'webgazer-pose-dot';
+    overlay.appendChild(dot);
+
+    const message = document.createElement('div');
+    message.className = 'pose-message';
+    overlay.appendChild(message);
+
+    const status = document.createElement('div');
+    status.className = 'pose-status';
+    overlay.appendChild(status);
+
+    document.body.appendChild(overlay);
+    state.calibrationOverlay = overlay;
+  }
+
+  updatePoseOverlayState(tier, 'search', { poseDelta: getPoseDelta(), holdProgress: 0 });
+}
+
+function updatePoseOverlayState(tier, mode, { poseDelta = { yaw: 0, pitch: 0 }, holdProgress = 0 } = {}) {
+  const overlay = state.calibrationOverlay;
+  if (!overlay || overlay.dataset.kind !== 'pose') {
+    return;
+  }
+  const messageEl = overlay.querySelector('.pose-message');
+  const statusEl = overlay.querySelector('.pose-status');
+  const cueEl = overlay.querySelector('.pose-cue');
+  const dotEl = overlay.querySelector('#webgazer-pose-dot');
+  overlay.dataset.tier = tier.id;
+
+  if (messageEl) {
+    if (mode === 'manual' || mode === 'manual-holding') {
+      messageEl.textContent = `${tier.instruction} (manual mode)`;
+    } else {
+      messageEl.textContent = tier.instruction;
+    }
+  }
+  if (statusEl) {
+    statusEl.textContent = formatPoseStatus(tier, poseDelta, mode, holdProgress);
+  }
+  applyPoseCueStyles(cueEl, tier, mode, holdProgress);
+
+  if (dotEl) {
+    if (mode === 'holding' || mode === 'capturing') {
+      dotEl.style.background = 'rgba(34, 197, 94, 0.9)';
+      dotEl.style.border = '4px solid rgba(22, 163, 74, 0.9)';
+      dotEl.style.boxShadow = '0 0 22px rgba(34, 197, 94, 0.5)';
+    } else {
+      dotEl.style.background = '#2563eb';
+      dotEl.style.border = '4px solid rgba(37, 99, 235, 0.85)';
+      dotEl.style.boxShadow = '0 0 18px rgba(37, 99, 235, 0.4)';
+    }
+  }
+}
+
+function applyPoseCueStyles(cue, tier, mode, holdProgress) {
+  if (!cue) return;
+
+  const searchColor = 'rgba(37, 99, 235, 0.35)';
+  const holdColor = `rgba(34, 197, 94, ${0.25 + Math.min(holdProgress, 1) * 0.35})`;
+  const capturingColor = 'rgba(22, 163, 74, 0.48)';
+  let activeColor = searchColor;
+  if (mode === 'holding' || mode === 'manual-holding') {
+    activeColor = holdColor;
+  } else if (mode === 'capturing') {
+    activeColor = capturingColor;
+  }
+
+  cue.style.opacity = mode === 'capturing' ? '1' : (mode === 'holding' || mode === 'manual-holding') ? '0.95' : '0.85';
+  cue.style.left = '0';
+  cue.style.right = '0';
+  cue.style.top = '0';
+  cue.style.bottom = '0';
+  cue.style.borderRadius = '0';
+
+  const effectiveTierId = tier.id;
+  switch (effectiveTierId) {
+    case 'left':
+      cue.style.left = '0';
+      cue.style.right = 'auto';
+      cue.style.top = '0';
+      cue.style.bottom = '0';
+      cue.style.width = '34%';
+      cue.style.height = '100%';
+      cue.style.background = `linear-gradient(to right, ${activeColor}, transparent)`;
+      break;
+    case 'right':
+      cue.style.right = '0';
+      cue.style.left = 'auto';
+      cue.style.top = '0';
+      cue.style.bottom = '0';
+      cue.style.width = '34%';
+      cue.style.height = '100%';
+      cue.style.background = `linear-gradient(to left, ${activeColor}, transparent)`;
+      break;
+    case 'up':
+      cue.style.left = '0';
+      cue.style.right = '0';
+      cue.style.top = '0';
+      cue.style.bottom = 'auto';
+      cue.style.height = '34%';
+      cue.style.width = '100%';
+      cue.style.background = `linear-gradient(to bottom, ${activeColor}, transparent)`;
+      break;
+    case 'down':
+      cue.style.left = '0';
+      cue.style.right = '0';
+      cue.style.top = 'auto';
+      cue.style.bottom = '0';
+      cue.style.height = '34%';
+      cue.style.width = '100%';
+      cue.style.background = `linear-gradient(to top, ${activeColor}, transparent)`;
+      break;
+    case 'return':
+    case 'center':
+    default:
+      cue.style.left = '20%';
+      cue.style.right = '20%';
+      cue.style.top = '20%';
+      cue.style.bottom = '20%';
+      cue.style.width = 'auto';
+      cue.style.height = 'auto';
+      cue.style.borderRadius = '50%';
+      cue.style.background = `radial-gradient(circle, ${activeColor}, transparent 65%)`;
+      break;
+  }
+}
+
+function formatPoseStatus(tier, poseDelta, mode, holdProgress) {
+  const yawDeg = Math.round(poseDelta.yaw * 57.2958);
+  const pitchDeg = Math.round(poseDelta.pitch * 57.2958);
+
+  if (mode === 'capturing') {
+    return 'Capturing… keep steady.';
+  }
+  if (mode === 'holding' || mode === 'manual-holding') {
+    return `Hold steady… ${Math.round(Math.min(holdProgress, 1) * 100)}%`;
+  }
+  if (mode === 'manual') {
+    return 'Hold that pose briefly — capturing automatically.';
+  }
+
+  if (mode === 'search') {
+    if (tier.id === 'center' || tier.id === 'return') {
+      return `Keep centered (Yaw ${yawDeg}°, Pitch ${pitchDeg}°, goal ±6°).`;
+    }
+    return `Move in the highlighted direction (Yaw ${yawDeg}°, Pitch ${pitchDeg}°).`;
+  }
+
+  if (tier.id === 'center' || tier.id === 'return') {
+    return `Yaw ${yawDeg}°, Pitch ${pitchDeg}° (keep within ±6°).`;
+  }
+  if (Math.abs(tier.yaw) > Math.abs(tier.pitch)) {
+    const targetYaw = Math.round(tier.yaw * 57.2958);
+    return `Current yaw ${yawDeg}° / target ${targetYaw}°`;
+  }
+  const targetPitch = Math.round(tier.pitch * 57.2958);
+  return `Current pitch ${pitchDeg}° / target ${targetPitch}°`;
+}
+
+function checkPoseReadiness(tier, poseDelta) {
+  if (!poseDelta) {
+    return { ready: false };
+  }
+  const targetYaw = tier.yaw;
+  const targetPitch = tier.pitch;
+  const yawMag = Math.abs(targetYaw);
+  const pitchMag = Math.abs(targetPitch);
+
+  const yawTol = yawMag > 0.25 ? 0.12 : 0.09;
+  const pitchTol = pitchMag > 0.2 ? 0.1 : 0.08;
+
+  let yawOk;
+  if (yawMag > 0.05) {
+    yawOk =
+      Math.sign(poseDelta.yaw || 0) === Math.sign(targetYaw || 0) &&
+      Math.abs(poseDelta.yaw) >= Math.max(0.18, yawMag * 0.65) &&
+      Math.abs(poseDelta.yaw - targetYaw) <= yawTol * 1.2;
+  } else {
+    yawOk = Math.abs(poseDelta.yaw) <= 0.12;
+  }
+
+  let pitchOk;
+  if (pitchMag > 0.05) {
+    pitchOk =
+      Math.sign(poseDelta.pitch || 0) === Math.sign(targetPitch || 0) &&
+      Math.abs(poseDelta.pitch) >= Math.max(0.15, pitchMag * 0.65) &&
+      Math.abs(poseDelta.pitch - targetPitch) <= pitchTol * 1.2;
+  } else {
+    pitchOk = Math.abs(poseDelta.pitch) <= 0.12;
+  }
+
+  return { ready: yawOk && pitchOk };
+}
+
+function evaluatePoseTier(tier) {
+  const manualMode = state.poseBaselineFallbackTriggered;
+  if (!state.pose.baseline.ready && !manualMode) {
+    updatePoseOverlayState(tier, 'search', { poseDelta: { yaw: 0, pitch: 0 }, holdProgress: 0 });
+    return;
+  }
+  const poseDelta = manualMode ? { yaw: 0, pitch: 0 } : getPoseDelta();
+  const readiness = manualMode ? { ready: true } : checkPoseReadiness(tier, poseDelta);
+
+  if (!readiness.ready || state.poseTierCapturing) {
+    state.poseTierHoldStart = null;
+    updatePoseOverlayState(tier, manualMode ? 'manual' : 'search', { poseDelta });
+    return;
+  }
+
+  if (!state.poseTierHoldStart) {
+    state.poseTierHoldStart = performance.now();
+  }
+  const elapsed = performance.now() - state.poseTierHoldStart;
+  const holdProgress = Math.min(1, elapsed / POSE_HOLD_DURATION_MS);
+  updatePoseOverlayState(tier, manualMode ? 'manual-holding' : 'holding', { poseDelta, holdProgress });
+
+  if (holdProgress >= 1) {
+    startPoseCapture(tier);
+  }
+}
+
+function startPoseCapture(tier) {
+  if (state.poseTierCapturing) {
+    return;
+  }
+  debugLog('pose-tier-capture', { tier: tier.id, manual: Boolean(state.poseBaselineFallbackTriggered) });
+  state.poseTierCapturing = true;
+  if (state.poseTierMonitor) {
+    clearInterval(state.poseTierMonitor);
+    state.poseTierMonitor = null;
+  }
+  if (state.poseTierTimer) {
+    clearTimeout(state.poseTierTimer);
+    state.poseTierTimer = null;
+  }
+  updatePoseOverlayState(tier, 'capturing', { poseDelta: getPoseDelta(), holdProgress: 1 });
+
+  const centerX = window.innerWidth / 2;
+  const centerY = window.innerHeight / 2;
+  beginCalibrationCapture(centerX, centerY, 'pose', {
+    tierId: tier.id,
+    onComplete: () => {
+      state.poseTierCapturing = false;
+      state.poseTierHoldStart = null;
+      state.poseTierMonitor = null;
+      state.poseTierTimer = null;
+      state.poseTierActive = false;
+      state.poseTierIndex += 1;
+      runNextPoseTier();
+    }
+  });
+}
+function finishPoseCalibrationSequence() {
+  state.poseTierActive = false;
+  state.poseTierIndex = 0;
+  if (state.poseTierTimer) {
+    clearTimeout(state.poseTierTimer);
+    state.poseTierTimer = null;
+  }
+  if (state.poseTierMonitor) {
+    clearInterval(state.poseTierMonitor);
+    state.poseTierMonitor = null;
+  }
+  state.poseTierHoldStart = null;
+  state.poseTierCapturing = false;
+  state.calibrationConfig.stage = 'pose-complete';
+  state.calibrationConfig.completed = true;
+  state.calibrationMode = false;
+  teardownCalibrationTargets();
+  updateCustomGazeIndicator(null);
+  state.indicatorAlwaysOn = true;
+  updateCustomGazeIndicator(state.smoothing.smoothed || null);
+  updateStatus('Pose calibration complete! You may run fine-tune or begin hover mode.', STATUS_OK);
+  if (controls.refineBtn) controls.refineBtn.disabled = false;
+  if (controls.beginBtn) controls.beginBtn.disabled = false;
+  if (controls.poseBtn) controls.poseBtn.disabled = false;
+}
 
   function captureCalibrationSample(rawPoint) {
     const capture = state.calibrationCapture;
     if (!capture) return;
     capture.samples.push({ x: rawPoint.x, y: rawPoint.y });
+    if (!capture.poseSamples) {
+      capture.poseSamples = [];
+    }
+    const poseDelta = getPoseDelta();
+    capture.poseSamples.push({ yaw: poseDelta.yaw, pitch: poseDelta.pitch });
     if (performance.now() >= capture.expires) {
       finalizeCalibrationCapture();
     }
@@ -1189,34 +3128,86 @@
 
   function finalizeCalibrationCapture(discard = false) {
     const capture = state.calibrationCapture;
-    if (!capture) return;
-    if (capture.timeoutId) {
-      clearTimeout(capture.timeoutId);
-    }
-    state.calibrationCapture = null;
-    if (discard || !capture.samples.length) {
-      return;
-    }
+  if (!capture) return;
+  if (capture.timeoutId) {
+    clearTimeout(capture.timeoutId);
+  }
+  state.calibrationCapture = null;
+  if (capture.type === 'pose') {
+    state.poseTierCapturing = false;
+  }
+  if (discard || !capture.samples.length) {
+    return;
+  }
 
-    const sum = capture.samples.reduce((acc, sample) => {
+    const coordinateSum = capture.samples.reduce((acc, sample) => {
       acc.x += sample.x;
       acc.y += sample.y;
       return acc;
     }, { x: 0, y: 0 });
     const count = capture.samples.length;
     const averaged = {
-      x: sum.x / count,
-      y: sum.y / count
+      x: coordinateSum.x / count,
+      y: coordinateSum.y / count
     };
+
+    const poseSum = (capture.poseSamples || []).reduce((acc, sample) => {
+      acc.yaw += sample.yaw;
+      acc.pitch += sample.pitch;
+      return acc;
+    }, { yaw: 0, pitch: 0 });
+
+    let poseAverage = {
+      yaw: capture.poseSamples && capture.poseSamples.length ? poseSum.yaw / capture.poseSamples.length : 0,
+      pitch: capture.poseSamples && capture.poseSamples.length ? poseSum.pitch / capture.poseSamples.length : 0
+    };
+
+    if (!state.pose.baseline.ready) {
+      poseAverage = { yaw: 0, pitch: 0 };
+    }
+
+    poseAverage.yaw = clamp(poseAverage.yaw, -0.7, 0.7);
+    poseAverage.pitch = clamp(poseAverage.pitch, -0.7, 0.7);
+
+    const now = Date.now();
+    let baseWeight = 0.7;
+    if (capture.type === 'calibration') {
+      baseWeight = 1.3;
+    } else if (capture.type === 'pose') {
+      baseWeight = 1.1;
+    }
+    const densityBoost = Math.min(count / 5, 1.2);
+    const poseBoost = 1 - Math.min(Math.hypot(poseAverage.yaw, poseAverage.pitch), 0.7);
+    const weight = (baseWeight + densityBoost) * Math.max(0.35, poseBoost);
 
     state.calibrationSamples.push({
       raw: averaged,
-      target: { x: capture.target.x, y: capture.target.y }
+      target: { x: capture.target.x, y: capture.target.y },
+      pose: poseAverage,
+      weight,
+      timestamp: now,
+      type: capture.type,
+      tier: capture.tierId || null
     });
-    if (state.calibrationSamples.length > 24) {
+    while (state.calibrationSamples.length > MAX_CALIBRATION_SAMPLES) {
       state.calibrationSamples.shift();
     }
-    recomputeCalibrationTransform();
+    if (capture.type === 'refinement') {
+      state.lastRefinementAt = now;
+    }
+    const nowPerf = performance.now();
+    if (!state.stability.lastRecomputeAt || (nowPerf - state.stability.lastRecomputeAt) >= TRANSFORM_UPDATE_MIN_INTERVAL_MS) {
+      recomputeCalibrationTransform();
+      state.stability.lastRecomputeAt = nowPerf;
+    }
+
+    if (typeof capture.onComplete === 'function') {
+      try {
+        capture.onComplete(capture);
+      } catch (error) {
+        console.warn('[WebGazer Prototype] Pose capture callback failed:', error);
+      }
+    }
   }
 
   function applyCalibrationTransform(point) {
@@ -1227,9 +3218,26 @@
         y: clamp(point.y, 0, window.innerHeight)
       };
     }
-    const [[a, b, c], [d, e, f]] = transform.matrix;
-    const calibratedX = a * point.x + b * point.y + c;
-    const calibratedY = d * point.x + e * point.y + f;
+    const coeffX = transform.matrix[0];
+    const coeffY = transform.matrix[1];
+    if (!Array.isArray(coeffX) || !Array.isArray(coeffY)) {
+      return {
+        x: clamp(point.x, 0, window.innerWidth),
+        y: clamp(point.y, 0, window.innerHeight)
+      };
+    }
+
+    let features;
+    if (coeffX.length === 5 && coeffY.length === 5) {
+      const poseDelta = getPoseDelta();
+      features = [point.x, point.y, poseDelta.yaw, poseDelta.pitch, 1];
+    } else {
+      features = [point.x, point.y, 1];
+    }
+
+    const calibratedX = coeffX.slice(0, features.length).reduce((sum, coeff, idx) => sum + coeff * features[idx], 0);
+    const calibratedY = coeffY.slice(0, features.length).reduce((sum, coeff, idx) => sum + coeff * features[idx], 0);
+
     return {
       x: clamp(calibratedX, 0, window.innerWidth),
       y: clamp(calibratedY, 0, window.innerHeight)
@@ -1249,8 +3257,8 @@
       return;
     }
 
-    const coeffX = solveLeastSquaresCoefficients(samples, 'x');
-    const coeffY = solveLeastSquaresCoefficients(samples, 'y');
+    const coeffX = solveWeightedCoefficients(samples, 'x');
+    const coeffY = solveWeightedCoefficients(samples, 'y');
 
     if (!coeffX || !coeffY) {
       return;
@@ -1262,38 +3270,90 @@
     };
   }
 
-  function solveLeastSquaresCoefficients(samples, axis) {
-    let sumX = 0;
-    let sumY = 0;
-    let sumXX = 0;
-    let sumYY = 0;
-    let sumXY = 0;
-    let sumTarget = 0;
-    let sumXTarget = 0;
-    let sumYTarget = 0;
-    const n = samples.length;
+  function solveWeightedCoefficients(samples, axis) {
+    const referenceTime = Date.now();
+    const accum = {
+      xx: 0,
+      xy: 0,
+      yy: 0,
+      xYaw: 0,
+      xPitch: 0,
+      yYaw: 0,
+      yPitch: 0,
+      yawYaw: 0,
+      yawPitch: 0,
+      pitchPitch: 0,
+      x: 0,
+      y: 0,
+      yaw: 0,
+      pitch: 0,
+      weight: 0,
+      xTarget: 0,
+      yTarget: 0,
+      yawTarget: 0,
+      pitchTarget: 0,
+      target: 0
+    };
 
     for (const sample of samples) {
       const rawX = sample.raw.x;
       const rawY = sample.raw.y;
       const targetVal = axis === 'x' ? sample.target.x : sample.target.y;
-      sumX += rawX;
-      sumY += rawY;
-      sumXX += rawX * rawX;
-      sumYY += rawY * rawY;
-      sumXY += rawX * rawY;
-      sumTarget += targetVal;
-      sumXTarget += rawX * targetVal;
-      sumYTarget += rawY * targetVal;
+      const pose = sample.pose || { yaw: 0, pitch: 0 };
+      const yaw = clamp(pose.yaw || 0, -0.7, 0.7);
+      const pitch = clamp(pose.pitch || 0, -0.7, 0.7);
+      const recencyWeight = Math.pow(0.5, Math.max(0, referenceTime - sample.timestamp) / RECENCY_HALF_LIFE_MS);
+      const w = Math.max(0.001, sample.weight * recencyWeight);
+
+      accum.xx += w * rawX * rawX;
+      accum.xy += w * rawX * rawY;
+      accum.yy += w * rawY * rawY;
+      accum.xYaw += w * rawX * yaw;
+      accum.xPitch += w * rawX * pitch;
+      accum.yYaw += w * rawY * yaw;
+      accum.yPitch += w * rawY * pitch;
+      accum.yawYaw += w * yaw * yaw;
+      accum.yawPitch += w * yaw * pitch;
+      accum.pitchPitch += w * pitch * pitch;
+      accum.x += w * rawX;
+      accum.y += w * rawY;
+      accum.yaw += w * yaw;
+      accum.pitch += w * pitch;
+      accum.weight += w;
+      accum.xTarget += w * rawX * targetVal;
+      accum.yTarget += w * rawY * targetVal;
+      accum.yawTarget += w * yaw * targetVal;
+      accum.pitchTarget += w * pitch * targetVal;
+      accum.target += w * targetVal;
     }
 
+    if (accum.weight < 1e-6) {
+      return null;
+    }
+
+    const epsilon = 1e-6;
+    const sampleCount = samples.length;
+    const lambda = sampleCount < 18 ? 0.12 : sampleCount < 36 ? 0.06 : 0.02;
     const matrix = [
-      [sumXX, sumXY, sumX],
-      [sumXY, sumYY, sumY],
-      [sumX, sumY, n]
+      [accum.xx + epsilon, accum.xy, accum.xYaw, accum.xPitch, accum.x],
+      [accum.xy, accum.yy + epsilon, accum.yYaw, accum.yPitch, accum.y],
+      [accum.xYaw, accum.yYaw, accum.yawYaw + epsilon, accum.yawPitch, accum.yaw],
+      [accum.xPitch, accum.yPitch, accum.yawPitch, accum.pitchPitch + epsilon, accum.pitch],
+      [accum.x, accum.y, accum.yaw, accum.pitch, accum.weight + epsilon]
     ];
-    const vector = [sumXTarget, sumYTarget, sumTarget];
-    return solve3x3(matrix, vector);
+    for (let i = 0; i < matrix.length; i += 1) {
+      matrix[i][i] += lambda;
+    }
+
+    const vector = [
+      accum.xTarget,
+      accum.yTarget,
+      accum.yawTarget,
+      accum.pitchTarget,
+      accum.target
+    ];
+
+    return solveLinearSystem(matrix, vector);
   }
 
   function solve3x3(m, v) {
@@ -1326,5 +3386,56 @@
       b * (d * i - f * g) +
       c * (d * h - e * g)
     );
+  }
+
+  function solveLinearSystem(matrix, vector) {
+    const n = vector.length;
+    const A = matrix.map((row) => row.slice());
+    const b = vector.slice();
+
+    for (let i = 0; i < n; i += 1) {
+      let pivotRow = i;
+      let pivotValue = Math.abs(A[i][i]);
+      for (let r = i + 1; r < n; r += 1) {
+        const value = Math.abs(A[r][i]);
+        if (value > pivotValue) {
+          pivotValue = value;
+          pivotRow = r;
+        }
+      }
+
+      if (pivotValue < 1e-9) {
+        return null;
+      }
+
+      if (pivotRow !== i) {
+        [A[i], A[pivotRow]] = [A[pivotRow], A[i]];
+        [b[i], b[pivotRow]] = [b[pivotRow], b[i]];
+      }
+
+      for (let r = i + 1; r < n; r += 1) {
+        const factor = A[r][i] / A[i][i];
+        if (!Number.isFinite(factor)) continue;
+        for (let c = i; c < n; c += 1) {
+          A[r][c] -= factor * A[i][c];
+        }
+        b[r] -= factor * b[i];
+      }
+    }
+
+    const solution = new Array(n).fill(0);
+    for (let i = n - 1; i >= 0; i -= 1) {
+      let sum = b[i];
+      for (let c = i + 1; c < n; c += 1) {
+        sum -= A[i][c] * solution[c];
+      }
+      const pivot = A[i][i];
+      if (Math.abs(pivot) < 1e-9) {
+        return null;
+      }
+      solution[i] = sum / pivot;
+    }
+
+    return solution;
   }
 })();

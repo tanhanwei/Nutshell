@@ -35,9 +35,16 @@ Our objective is to deliver a gaze tracker that is accurate, calm, and trustwort
 
 **Goal:** maintain accuracy when the user shifts position or tilts their head.
 
-- Integrate eye/face landmarks (WebGazer or MediaPipe) to estimate roll/pitch/yaw.
-- Normalise gaze points with head pose compensation before feeding the transform.
-- Optionally estimate user-specific eye geometry (interpupillary distance, relative camera height) during calibration.
+- **3a: Multi-pose calibration & residual offsets**
+  - Run extra center-point captures while the user turns their head left/right/up.
+  - Bucket hover refinements by pose and learn per-pose residual offsets.
+  - Blend offsets at runtime based on the live pose delta to counteract drift.
+
+  _Status (2025-02-05): Implemented in the prototype. Users now trigger the pose sequence manually, follow clear step-by-step cues (left/right/up/down/return), and the background solver weights samples per pose. Hover refinements continue to feed pose-aware offsets. (2025-02-06 update: WebGazer now ships with CLMtrackr bundled; when the tracker is missing we fall back to timed manual captures and surface console guidance so testers can spot hardware limitations.)_
+- **3b: Full head pose compensation**
+  - Integrate eye/face landmarks (WebGazer/MediaPipe) to solve roll/pitch/yaw.
+  - Normalise gaze points with a 3D-aware transform before feeding the affine model.
+  - Optionally estimate user-specific eye geometry (interpupillary distance, relative camera height) during calibration.
 
 **Success metric:** accuracy stays stable even after intentional head movement; minimal drift reported in hover sessions.
 
@@ -72,3 +79,9 @@ Our objective is to deliver a gaze tracker that is accurate, calm, and trustwort
 - Each phase should ship behind a feature flag so we can run controlled tests.
 - We will benchmark after every phase via `test/webgazer-demo.html` and a live YouTube hover session.
 - Documentation updates and quick video captures accompany each milestone so the team can evaluate progress.
+- For manual smoke checks, run the following in DevTools after calibration to confirm the tracker and predictions are live:
+  ```js
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  console.log('tracker:', webgazer.getTracker()?.name);
+  console.log('prediction:', await (window.getCurrentPredictionAsync?.() ?? webgazer.getCurrentPrediction()));
+  ```

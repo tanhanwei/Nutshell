@@ -13,6 +13,7 @@
       <button id="wg-start-calibration">Start Webcam Calibration</button>
       <button id="wg-begin-hover" disabled>Begin Gaze Hover Mode</button>
       <button id="wg-stop-hover" class="secondary" disabled>Stop Hover Mode</button>
+      <button id="wg-start-pose" class="secondary" disabled>Run Pose Calibration</button>
       <label class="stacked">
         Camera:
         <select id="wg-camera-select" aria-label="Camera selection">
@@ -30,6 +31,14 @@
       </label>
       <button id="wg-refine-calibration" type="button" class="secondary" disabled>Run Fine-Tune Calibration</button>
       <div id="webgazer-status">Press “Start Webcam Calibration” to begin.</div>
+      <details id="wg-pose-instructions">
+        <summary>Advanced: Maintain alignment</summary>
+        <ol>
+          <li>After the blue grid, keep gazing at the center dot.</li>
+          <li>Turn your head left/right and up/down when prompted.</li>
+          <li>Stay within webcam view; the status line will guide you.</li>
+        </ol>
+      </details>
       <p class="webgazer-note">
         The WebGazer library is loaded from <code>lib/webgazer.js</code> if present, falling back to
         <a href="https://webgazer.cs.brown.edu/" target="_blank" rel="noopener noreferrer">the official CDN</a>.
