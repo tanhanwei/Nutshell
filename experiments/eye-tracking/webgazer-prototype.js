@@ -8,8 +8,7 @@
   const PREDICTION_BUFFER_SIZE = 60;
   const PREDICTION_BUFFER_WINDOW_MS = 1000;
   const MIN_STABLE_ANCHOR_HITS = 4;
-  const ANCHOR_DRIFT_THRESHOLD_PX = 68;
-  const RECT_PADDING_PX = 14;
+  const ANCHOR_DRIFT_THRESHOLD_PX = 40;
   const CALIBRATION_SAMPLE_WINDOW_MS = 560;
   const REFINEMENT_SAMPLE_WINDOW_MS = 320;
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -26,6 +25,15 @@
   const POSE_HOLD_DURATION_MS = 700;
   const POSE_TIER_PREP_MS = 700;
   const POSE_BASELINE_FALLBACK_MS = 9000;
+  const UI_PREVIEW_WIDTH_PX = 360; // preview box width in CSS pixels
+  const VIEWPORT_EDGE_PAD_V = 0.06; // top/bottom 6% margin for calibration dots
+  const VIEWPORT_EDGE_H = 0.02; // left/right 2% margin for calibration dots
+  // Feature switches for hackathon cut
+  const FEATURES = {
+    pose: false,
+    clmHardLock: true,
+    showLivePreview: false
+  };
   // --- Stability / smoothing config ---
   const STABILITY_WINDOW_MS = 1000;
   const STABILITY_MIN_SAMPLES = 8;
@@ -71,6 +79,7 @@
     trackerFallbackTimer: null,
     trackerFallbackDelay: null,
     predictionBuffer: [],
+    hasEverPredicted: false,
     selectedCameraId: null,
     cameraDevices: [],
     restartInProgress: false,
@@ -118,13 +127,16 @@
       stableSince: null,
       unstableSince: null
     },
-    euro: null
+    euro: null,
+    _zoomListener: null,
+    _zoomBaseline: null
   };
 
   const controls = {};
 
   document.addEventListener('DOMContentLoaded', () => {
     cacheControls();
+    applyFeatureFlags();
     attachControlHandlers();
     populateCameraOptions();
     ensureTooltip();
@@ -240,6 +252,16 @@
     state.statusEl = controls.status;
   }
 
+  function applyFeatureFlags() {
+    if (controls.poseBtn) {
+      controls.poseBtn.style.display = FEATURES.pose ? '' : 'none';
+    }
+    if (controls.previewToggle) {
+      controls.previewToggle.checked = Boolean(FEATURES.showLivePreview);
+      controls.previewToggle.disabled = false;
+    }
+  }
+
   function attachControlHandlers() {
     if (controls.startBtn) {
       controls.startBtn.addEventListener('click', handleStartCalibration);
@@ -269,10 +291,35 @@
       controls.refineBtn.addEventListener('click', handleRefineCalibration);
     }
     if (controls.poseBtn) {
-      controls.poseBtn.addEventListener('click', () => {
-        startPoseCalibrationSequence();
+      if (!FEATURES.pose) {
+        controls.poseBtn.style.display = 'none';
+      } else {
+        controls.poseBtn.addEventListener('click', () => {
+          startPoseCalibrationSequence();
+        });
+        state.poseBtnDefaultLabel = controls.poseBtn.textContent || 'Run Pose Calibration';
+      }
+    }
+    if (controls.previewToggle) {
+      controls.previewToggle.addEventListener('change', (event) => {
+        FEATURES.showLivePreview = Boolean(event.target.checked);
+        try {
+          if (window.webgazer && typeof window.webgazer.showVideoPreview === 'function') {
+            window.webgazer.showVideoPreview(FEATURES.showLivePreview);
+          }
+        } catch (error) {
+          debugLog('preview-toggle-video-error', { error: error?.message || String(error) });
+        }
+        try {
+          if (window.webgazer && typeof window.webgazer.showPredictionPoints === 'function') {
+            window.webgazer.showPredictionPoints(true);
+          }
+        } catch (_error) {
+          // ignore
+        }
+        attachWgNodesToDock();
+        syncPreviewTransformToVideo();
       });
-      state.poseBtnDefaultLabel = controls.poseBtn.textContent || 'Run Pose Calibration';
     }
   }
 
@@ -292,6 +339,7 @@
   }
 
   function markPoseBaselineUnavailable() {
+    if (!FEATURES.pose) return;
     state.poseBaselineFallbackTriggered = true;
     updatePoseBaselineProgressDisplay(null);
     debugLog('pose-baseline-landmarks-missing');
@@ -301,6 +349,7 @@
   }
 
   function updatePoseBaselineProgressDisplay(progressPercent) {
+    if (!FEATURES.pose) return;
     if (!controls.poseBtn) return;
     const label = state.poseBtnDefaultLabel || 'Run Pose Calibration';
     if (progressPercent == null || Number.isNaN(progressPercent)) {
@@ -426,7 +475,10 @@
     }
     if (controls.beginBtn) controls.beginBtn.disabled = true;
     if (controls.refineBtn) controls.refineBtn.disabled = true;
-    if (controls.poseBtn) controls.poseBtn.disabled = true;
+    if (controls.poseBtn) {
+      controls.poseBtn.disabled = true;
+      controls.poseBtn.style.display = FEATURES.pose ? '' : 'none';
+    }
     updatePoseBaselineProgressDisplay(null);
     state.indicatorAlwaysOn = false;
     clearPoseBaselineMonitor({ resetFallback: true });
@@ -443,6 +495,7 @@
       state.poseTierMonitor = null;
     }
     state.predictionBuffer = [];
+    state.hasEverPredicted = false;
     debugLog('calibration-started', { cameraChange: triggeredByCameraChange });
     updateStatus('Loading WebGazer… please allow camera access.');
     try {
@@ -511,16 +564,69 @@
 
       if (typeof gaze.begin === 'function') {
         await gaze.begin();
+        (function installPredictionWatchdog() {
+          const t0 = performance.now();
+          let tick = 0;
+          let triedReacquire = 0;
+          let lastReacquireAt = 0;
+          const iv = setInterval(async () => {
+            tick++;
+            try {
+              const now = performance.now();
+              const pred = await (window.getCurrentPredictionAsync?.() ?? window.webgazer?.getCurrentPrediction?.());
+              if (pred && Number.isFinite(pred.x) && Number.isFinite(pred.y)) {
+                state.hasEverPredicted = true;
+                if (FEATURES.clmHardLock) {
+                  state.flags = state.flags || {};
+                  state.flags.lockTrackerToCLM = true;
+                }
+                clearInterval(iv);
+                debugLog('prediction-watchdog-ok', { afterMs: now - t0, tries: triedReacquire });
+                return;
+              }
+              const elapsed = now - t0;
+
+              if (elapsed > 4000 && elapsed < 12000 && (now - lastReacquireAt) >= 1500 && triedReacquire < 2) {
+                const tr = window.webgazer?.getTracker?.();
+                if (tr && typeof tr._reacquire === 'function') {
+                  tr._reacquire();
+                  triedReacquire += 1;
+                  lastReacquireAt = now;
+                  debugLog('prediction-watchdog-reacquire', { attempt: triedReacquire });
+                }
+              }
+
+              if (elapsed > 10000) {
+                const allowFallback = !FEATURES.clmHardLock || !state.hasEverPredicted;
+                if (allowFallback) {
+                  try {
+                    await window.webgazer?.setTracker?.('TFFacemesh');
+                    debugLog('prediction-watchdog-switched-to-tf');
+                  } catch (_e) {
+                    // ignore fallback errors
+                  }
+                } else {
+                  debugLog('prediction-watchdog-hold-clm', { elapsed });
+                }
+                clearInterval(iv);
+              }
+            } catch (_e) {
+              // keep looping
+            }
+          }, 350);
+        })();
       }
 
       await waitForWebgazerDomElements();
       ensureWebgazerSupportCanvases();
 
       try {
-        gaze.showVideoPreview(Boolean(controls.previewToggle?.checked));
+        gaze.showVideoPreview(Boolean(FEATURES.showLivePreview));
       } catch (error) {
         console.debug('[WebGazer Prototype] showVideoPreview failed:', error);
       }
+      attachWgNodesToDock();
+      syncPreviewTransformToVideo();
       try {
         gaze.showPredictionPoints(true);
       } catch (error) {
@@ -551,7 +657,7 @@
         smoothed: null,
         pendingJump: null
       };
-      state.euro = new OneEuro({ minCutoff: 0.7, beta: 0.02, dCutoff: 1.0 });
+      state.euro = new OneEuro({ minCutoff: 0.5, beta: 0.01, dCutoff: 1.0 });
       state.stability.lastRecomputeAt = 0;
       state.stability.hardGateUntil = performance.now() + 1500;
       state.stability.stable = false;
@@ -574,8 +680,10 @@
       state.indicatorAlwaysOn = false;
       state.lastRefinementAt = 0;
       state.flags = state.flags || {};
-      if (typeof state.flags.lockTrackerToCLM !== 'boolean') {
+      if (FEATURES.clmHardLock) {
         state.flags.lockTrackerToCLM = true;
+      } else {
+        state.flags.lockTrackerToCLM = false;
       }
       if (state.trackerFallbackTimer) {
         clearInterval(state.trackerFallbackTimer);
@@ -656,8 +764,9 @@
 
               const longLost = frames >= FALLBACK_MIN_FRAMES && lostMs >= FALLBACK_REQUIRED_LOST_MS;
               if (longLost && consecutiveStrikes >= FALLBACK_STRIKES_TO_SWITCH) {
-                if (state.flags?.lockTrackerToCLM) {
-                  debugLog('tracker-stay-clm', { reason: 'lockTrackerToCLM', frames, lostMs, points, score });
+                const lockActive = (FEATURES.clmHardLock && state.hasEverPredicted) || Boolean(state.flags?.lockTrackerToCLM);
+                if (lockActive) {
+                  debugLog('tracker-stay-clm', { reason: 'hard-lock', frames, lostMs, points, score, hasEverPredicted: state.hasEverPredicted });
                   consecutiveStrikes = 0;
                   return;
                 }
@@ -679,14 +788,13 @@
           startProbe();
         }, FALLBACK_PROBE_DELAY_MS);
       }
-    finalizeCalibrationCapture(true);
-    if (controls.poseBtn) controls.poseBtn.disabled = true;
+      finalizeCalibrationCapture(true);
+      if (controls.poseBtn) controls.poseBtn.disabled = true;
       state.calibrationConfig.stage = 'primary';
       state.calibrationConfig.primaryComplete = false;
       state.calibrationConfig.completed = false;
       state.calibrationConfig.points = [];
       state.calibrationConfig.counts = new Map();
-      if (controls.poseBtn) controls.poseBtn.disabled = true;
       updateCustomGazeIndicator(null);
 
       initialiseCalibrationTargets('primary');
@@ -695,7 +803,9 @@
       } catch (error) {
         console.warn('[WebGazer Prototype] Unable to show prediction points after calibration init:', error);
       }
-      gaze.showVideoPreview(Boolean(controls.previewToggle?.checked));
+      gaze.showVideoPreview(Boolean(FEATURES.showLivePreview));
+      attachWgNodesToDock();
+      syncPreviewTransformToVideo();
       updateStatus('Calibration running — click each blue dot three times to improve accuracy.', STATUS_OK);
       if (controls.stopBtn) controls.stopBtn.disabled = false;
       populateCameraOptions();
@@ -718,7 +828,9 @@
     if (gaze) {
       waitForWebgazerDomElements(1500).then(() => {
         try {
-          gaze.showVideoPreview(Boolean(controls.previewToggle?.checked));
+          gaze.showVideoPreview(Boolean(FEATURES.showLivePreview));
+          attachWgNodesToDock();
+          syncPreviewTransformToVideo();
         } catch (error) {
           console.debug('[WebGazer Prototype] showVideoPreview during fine-tune failed:', error);
         }
@@ -775,7 +887,9 @@
       } catch (error) {
         console.debug('[WebGazer Prototype] Failed to hide prediction points:', error);
       }
-      gaze.showVideoPreview(Boolean(controls.previewToggle?.checked));
+      gaze.showVideoPreview(Boolean(FEATURES.showLivePreview));
+      attachWgNodesToDock();
+      syncPreviewTransformToVideo();
     }
     teardownCalibrationTargets();
     updateStatus('Gaze hover active — look at a link and dwell to trigger.', STATUS_OK);
@@ -1314,96 +1428,80 @@
   };
 
     ClmTrackrAdapter.prototype.getEyePatches = function(imageCanvas) {
-      if (!imageCanvas || imageCanvas.width === 0) {
-        return null;
-      }
+      // Fall back to WG's processing canvas if caller didn't pass one.
+      let canvas = imageCanvas || document.getElementById('webgazerVideoCanvas');
 
-      const positions = this.trackFrame(imageCanvas);
-      if (!Array.isArray(positions) || positions.length < 33) {
-        return false;
-      }
-
-      const source = resolveTrackTarget(imageCanvas);
-      const width = source.width || imageCanvas.width;
-      const height = source.height || imageCanvas.height;
-      const scaleX = width ? (imageCanvas.width / width) : 1;
-      const scaleY = height ? (imageCanvas.height / height) : 1;
-
-      let leftX0 = positions[23][0] * scaleX;
-      let leftY0 = positions[24][1] * scaleY;
-      let leftX1 = positions[25][0] * scaleX;
-      let leftY1 = positions[26][1] * scaleY;
-      let rightX0 = positions[30][0] * scaleX;
-      let rightY0 = positions[29][1] * scaleY;
-      let rightX1 = positions[28][0] * scaleX;
-      let rightY1 = positions[31][1] * scaleY;
-
-      let leftMinX = Math.min(leftX0, leftX1);
-      let leftMaxX = Math.max(leftX0, leftX1);
-      let leftMinY = Math.min(leftY0, leftY1);
-      let leftMaxY = Math.max(leftY0, leftY1);
-      let rightMinX = Math.min(rightX0, rightX1);
-      let rightMaxX = Math.max(rightX0, rightX1);
-      let rightMinY = Math.min(rightY0, rightY1);
-      let rightMaxY = Math.max(rightY0, rightY1);
-
-      const leftPadX = Math.max(2, 0.1 * (leftMaxX - leftMinX));
-      const leftPadY = Math.max(2, 0.1 * (leftMaxY - leftMinY));
-      const rightPadX = Math.max(2, 0.1 * (rightMaxX - rightMinX));
-      const rightPadY = Math.max(2, 0.1 * (rightMaxY - rightMinY));
-
-      leftMinX = Math.max(0, Math.floor(leftMinX - leftPadX));
-      leftMaxX = Math.min(imageCanvas.width, Math.ceil(leftMaxX + leftPadX));
-      leftMinY = Math.max(0, Math.floor(leftMinY - leftPadY));
-      leftMaxY = Math.min(imageCanvas.height, Math.ceil(leftMaxY + leftPadY));
-
-      rightMinX = Math.max(0, Math.floor(rightMinX - rightPadX));
-      rightMaxX = Math.min(imageCanvas.width, Math.ceil(rightMaxX + rightPadX));
-      rightMinY = Math.max(0, Math.floor(rightMinY - rightPadY));
-      rightMaxY = Math.min(imageCanvas.height, Math.ceil(rightMaxY + rightPadY));
-
-      const leftWidth = Math.max(1, leftMaxX - leftMinX);
-      const leftHeight = Math.max(1, leftMaxY - leftMinY);
-      const rightWidth = Math.max(1, rightMaxX - rightMinX);
-      const rightHeight = Math.max(1, rightMaxY - rightMinY);
-
-      if (leftWidth <= 0 || leftHeight <= 0 || rightWidth <= 0 || rightHeight <= 0) {
-        return false;
-      }
-
-      let leftPatch = null;
-      let rightPatch = null;
-      try {
-        const ctx = imageCanvas.getContext('2d', { willReadFrequently: true });
-        if (!ctx) {
+      // If still missing or not yet sized, try to build a temporary frame from the video.
+      if (!canvas || !canvas.width || !canvas.height) {
+        const src = resolveTrackTarget(null);
+        if (!src.videoReady) {
+          // Signal "not ready yet" — WG will try again next frame.
           return null;
         }
-        leftPatch = ctx.getImageData(leftMinX, leftMinY, leftWidth, leftHeight);
-        rightPatch = ctx.getImageData(rightMinX, rightMinY, rightWidth, rightHeight);
-      } catch (_error) {
+        const tmp = document.createElement('canvas');
+        tmp.width = src.width;
+        tmp.height = src.height;
+        const cctx = tmp.getContext('2d', { willReadFrequently: true });
+        cctx.drawImage(src.video, 0, 0, src.width, src.height);
+        canvas = tmp;
+      }
+
+      // Make sure CLM is advancing even if we weren't started on this canvas
+      const positions = this.trackFrame(canvas);
+      if (!Array.isArray(positions) || positions.length < 33) {
+        // Return "false" (no blink) rather than null to keep WG loop alive
         return false;
       }
 
-      return {
-        left: {
-          patch: leftPatch,
-          imagex: leftMinX,
-          imagey: leftMinY,
-          width: leftWidth,
-          height: leftHeight,
-          blink: false
-        },
-        right: {
-          patch: rightPatch,
-          imagex: rightMinX,
-          imagey: rightMinY,
-          width: rightWidth,
-          height: rightHeight,
-          blink: false
-        },
-        positions
+      // Calculate eye ROIs and crop patches from the canvas (same as before, just using `canvas`)
+      const width = canvas.width;
+      const height = canvas.height;
+
+      // Use your existing ROI logic but remove image->video scaling:
+      // Positions are reported in video space. Ensure our canvas is the same size (we’ll enforce that in step 2).
+      const p = positions;
+      // Left eye bounds (CLM indices)
+      let lx0 = p[23][0], ly0 = p[24][1];
+      let lx1 = p[25][0], ly1 = p[26][1];
+      // Right eye bounds
+      let rx0 = p[30][0], ry0 = p[29][1];
+      let rx1 = p[28][0], ry1 = p[31][1];
+
+      let lminx = Math.max(0, Math.floor(Math.min(lx0, lx1)));
+      let lmaxx = Math.min(width, Math.ceil(Math.max(lx0, lx1)));
+      let lminy = Math.max(0, Math.floor(Math.min(ly0, ly1)));
+      let lmaxy = Math.min(height, Math.ceil(Math.max(ly0, ly1)));
+
+      let rminx = Math.max(0, Math.floor(Math.min(rx0, rx1)));
+      let rmaxx = Math.min(width, Math.ceil(Math.max(rx0, rx1)));
+      let rminy = Math.max(0, Math.floor(Math.min(ry0, ry1)));
+      let rmaxy = Math.min(height, Math.ceil(Math.max(ry0, ry1)));
+
+      const pad = (min, max, maxLimit) => {
+        const grow = Math.max(2, Math.round(0.12 * (max - min)));
+        return [Math.max(0, min - grow), Math.min(maxLimit, max + grow)];
       };
-  };
+      [lminx, lmaxx] = pad(lminx, lmaxx, width);
+      [lminy, lmaxy] = pad(lminy, lmaxy, height);
+      [rminx, rmaxx] = pad(rminx, rmaxx, width);
+      [rminy, rmaxy] = pad(rminy, rmaxy, height);
+
+      const lw = Math.max(1, lmaxx - lminx), lh = Math.max(1, lmaxy - lminy);
+      const rw = Math.max(1, rmaxx - rminx), rh = Math.max(1, rmaxy - rminy);
+
+      try {
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const leftPatch  = ctx.getImageData(lminx, lminy, lw, lh);
+        const rightPatch = ctx.getImageData(rminx, rminy, rw, rh);
+        return {
+          left:  { patch: leftPatch,  imagex: lminx, imagey: lminy, width: lw, height: lh, blink: false },
+          right: { patch: rightPatch, imagex: rminx, imagey: rminy, width: rw, height: rh, blink: false },
+          positions
+        };
+      } catch (_e) {
+        return false;
+      }
+    };
 
   ClmTrackrAdapter.prototype.getPositions = function() {
     try {
@@ -1454,10 +1552,15 @@
       }
 
       const target = resolveTrackTarget(null);
+      const mirrored = _isFeedMirrored();
       const scaleX = target && target.width ? (canvas.width / target.width) : 1;
       const scaleY = target && target.height ? (canvas.height / target.height) : 1;
 
       ctx.save();
+      if (mirrored) {
+        ctx.translate(canvas.width, 0);
+        ctx.scale(-1, 1);
+      }
       ctx.lineWidth = 1;
       ctx.strokeStyle = 'rgba(37, 99, 235, 0.9)';
 
@@ -1559,8 +1662,18 @@
       return;
     }
 
-    const poseMeasurement = extractHeadPose();
-    updatePoseState(poseMeasurement);
+    if (Number.isFinite(data.x) && Number.isFinite(data.y)) {
+      state.hasEverPredicted = true;
+      if (FEATURES.clmHardLock) {
+        state.flags = state.flags || {};
+        state.flags.lockTrackerToCLM = true;
+      }
+    }
+
+    if (FEATURES.pose) {
+      const poseMeasurement = extractHeadPose();
+      updatePoseState(poseMeasurement);
+    }
 
     const rawPoint = { x: data.x, y: data.y };
     captureCalibrationSample(rawPoint);
@@ -1638,8 +1751,9 @@
     const rect = anchor.getBoundingClientRect();
     const centerX = rect.left + rect.width / 2;
     const centerY = rect.top + rect.height / 2;
+    const halo = Math.max(ANCHOR_DRIFT_THRESHOLD_PX, Math.min(48, Math.min(rect.width, rect.height) * 0.45));
     const drift = Math.hypot(centerX - centroid.x, centerY - centroid.y);
-    if (drift > ANCHOR_DRIFT_THRESHOLD_PX) {
+    if (drift > Math.max(16, 0.8 * halo)) {
       state.dwellStart = performance.now();
       return;
     }
@@ -1647,6 +1761,10 @@
     const now = performance.now();
     const elapsed = now - state.dwellStart;
     const lastTrigger = state.lastTriggerByNode.get(anchor) || 0;
+    const prime = Math.max(120, Math.min(250, Math.round(stability.stdX + stability.stdY)));
+    if (elapsed < prime) {
+      return;
+    }
 
     if (elapsed >= threshold && (now - lastTrigger) >= RETRIGGER_COOLDOWN_MS) {
       state.lastTriggerByNode.set(anchor, now);
@@ -1655,14 +1773,46 @@
     }
   }
 
+  function anchorAtPoint(x, y) {
+    const el = document.elementFromPoint(x, y);
+    return el ? el.closest('a[href]') : null;
+  }
+
+  function anchorNearPoint(x, y, radius = 16) {
+    const offsets = [
+      [radius, 0],
+      [-radius, 0],
+      [0, radius],
+      [0, -radius],
+      [radius, radius],
+      [radius, -radius],
+      [-radius, radius],
+      [-radius, -radius]
+    ];
+    for (const [dx, dy] of offsets) {
+      const anchor = anchorAtPoint(x + dx, y + dy);
+      if (anchor) {
+        return anchor;
+      }
+    }
+    return null;
+  }
+
+  function anchorWithinHalo(point, rect) {
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const dx = point.x - cx;
+    const dy = point.y - cy;
+    const base = Math.max(12, Math.min(48, Math.min(rect.width, rect.height) * 0.45));
+    return Math.hypot(dx, dy) <= base;
+  }
+
   function anchorFromViewportPoint(x, y) {
     if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
     if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) {
       return null;
     }
-    const el = document.elementFromPoint(x, y);
-    if (!el) return null;
-    return el.closest('a[href]');
+    return anchorAtPoint(x, y) || anchorNearPoint(x, y, 16);
   }
 
   function highlightAnchor(anchor) {
@@ -1784,7 +1934,7 @@
 
     const grid = document.createElement('div');
     grid.style.position = 'absolute';
-    grid.style.inset = '5%';
+    grid.style.inset = '0';
     grid.style.pointerEvents = 'none';
 
     overlay.appendChild(grid);
@@ -1796,58 +1946,72 @@
     state.calibrationConfig.counts = new Map();
     state.calibrationConfig.completed = false;
 
-    const primaryPositions = [
-      { x: 10, y: 10 },
-      { x: 50, y: 10 },
-      { x: 90, y: 10 },
-      { x: 10, y: 50 },
-      { x: 50, y: 50 },
-      { x: 90, y: 50 },
-      { x: 10, y: 90 },
-      { x: 50, y: 90 },
-      { x: 90, y: 90 }
-    ];
-
-  const finePositions = [
-    { x: 20, y: 20 },
-    { x: 50, y: 18 },
-    { x: 80, y: 20 },
-    { x: 20, y: 50 },
-    { x: 80, y: 50 },
-    { x: 20, y: 80 },
-    { x: 50, y: 82 },
-    { x: 80, y: 80 },
-    { x: 35, y: 35 },
-    { x: 65, y: 35 },
-    { x: 35, y: 65 },
-    { x: 65, y: 65 }
-  ];
-
-    const positions = stage === 'primary' ? primaryPositions : finePositions;
     state.calibrationConfig.clicksPerPoint = stage === 'primary' ? 3 : 2;
 
-    positions.forEach((position) => {
+    const vv = window.visualViewport;
+    const scale = vv?.scale || 1;
+    const padH = Math.max(8, Math.round(VIEWPORT_EDGE_H * window.innerWidth));
+    const padV = Math.max(8, Math.round(VIEWPORT_EDGE_PAD_V * window.innerHeight));
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+
+    function placeDot(xPx, yPx, color, border) {
       const point = document.createElement('button');
       point.type = 'button';
       point.className = 'webgazer-calibration-point';
-      point.style.position = 'absolute';
-      point.style.width = '28px';
-      point.style.height = '28px';
-      point.style.borderRadius = '50%';
-      point.style.background = stage === 'primary' ? '#2563eb' : '#ea580c';
-      point.style.border = stage === 'primary' ? '3px solid #1d4ed8' : '3px solid #c2410c';
-      point.style.opacity = '0.9';
-      point.style.pointerEvents = 'auto';
-      point.style.cursor = 'crosshair';
-      point.style.left = `calc(${position.x}% - 14px)`;
-      point.style.top = `calc(${position.y}% - 14px)`;
+      Object.assign(point.style, {
+        position: 'absolute',
+        width: '28px',
+        height: '28px',
+        borderRadius: '50%',
+        background: color,
+        border: `3px solid ${border}`,
+        opacity: '0.9',
+        pointerEvents: 'auto',
+        cursor: 'crosshair',
+        left: `${Math.round(xPx - 14)}px`,
+        top: `${Math.round(yPx - 14)}px`
+      });
       point.title = 'Click to calibrate';
       point.addEventListener('click', (event) => handleCalibrationClick(event, point));
 
       grid.appendChild(point);
       state.calibrationConfig.points.push(point);
       state.calibrationConfig.counts.set(point, 0);
+    }
+
+    const xs = [padH, Math.round(W / 2), Math.max(W - padH, padH + 1)];
+    const ys = [padV, Math.round(H / 2), Math.max(H - padV, padV + 1)];
+    const color = stage === 'primary' ? '#2563eb' : '#ea580c';
+    const border = stage === 'primary' ? '#1d4ed8' : '#c2410c';
+
+    ys.forEach((y) => {
+      xs.forEach((x) => {
+        placeDot(x, y, color, border);
+      });
     });
+
+    state._zoomBaseline = { scale, W, H };
+    if (vv) {
+      if (state._zoomListener) {
+        vv.removeEventListener('resize', state._zoomListener);
+      }
+      state._zoomListener = () => {
+        const currentScale = vv.scale || 1;
+        if (
+          Math.abs(currentScale - state._zoomBaseline.scale) > 0.05 ||
+          Math.abs(window.innerWidth - state._zoomBaseline.W) > 2 ||
+          Math.abs(window.innerHeight - state._zoomBaseline.H) > 2
+        ) {
+          updateStatus('Zoom/viewport changed — restarting calibration…', 'var(--status-warn, #dc2626)');
+          if (controls.beginBtn) controls.beginBtn.disabled = true;
+          finalizeCalibrationCapture(true);
+          teardownCalibrationTargets();
+          startCalibrationWorkflow({ triggeredByCameraChange: true });
+        }
+      };
+      vv.addEventListener('resize', state._zoomListener);
+    }
 
     const overlayMessage = document.createElement('div');
     overlayMessage.textContent = stage === 'primary'
@@ -1915,55 +2079,61 @@ function handleCalibrationClick(event, point) {
       if (state.calibrationConfig.stage === 'primary') {
         state.calibrationConfig.primaryComplete = true;
         finalizeCalibrationCapture();
-        clearPoseBaselineMonitor();
-        if (controls.refineBtn) controls.refineBtn.disabled = false;
-        if (state.pose.baseline.ready) {
-          updateStatus('Baseline calibration complete! When ready, click “Run Pose Calibration” to align head movement.', STATUS_OK);
-          if (controls.poseBtn) {
-            controls.poseBtn.disabled = false;
-            controls.poseBtn.focus({ preventScroll: true });
+        if (FEATURES.pose) {
+          clearPoseBaselineMonitor();
+          if (controls.refineBtn) controls.refineBtn.disabled = false;
+          if (state.pose.baseline.ready) {
+            updateStatus('Baseline calibration complete! When ready, click “Run Pose Calibration” to align head movement.', STATUS_OK);
+            if (controls.poseBtn) {
+              controls.poseBtn.disabled = false;
+              controls.poseBtn.focus({ preventScroll: true });
+            }
+          } else {
+            updateStatus('Baseline calibration complete! Hold centered while we stabilise your neutral pose…', STATUS_OK);
+            const base = state.pose.baseline;
+            const initialProgress = base ? Math.min(100, (base.count / POSE_BASELINE_TARGET) * 100) : 0;
+            updatePoseBaselineProgressDisplay(initialProgress);
+            state.poseBaselineMonitorStartedAt = performance.now();
+            state.poseBaselineReadyMonitor = setInterval(() => {
+              const base = state.pose.baseline;
+              if (!base) return;
+              if (base.ready) {
+                clearPoseBaselineMonitor();
+                updateStatus('Neutral pose locked in! When ready, click “Run Pose Calibration”.', STATUS_OK);
+                if (controls.poseBtn) {
+                  controls.poseBtn.disabled = false;
+                  controls.poseBtn.focus({ preventScroll: true });
+                }
+                if (controls.refineBtn) controls.refineBtn.disabled = false;
+                debugLog('pose-baseline-ready', { count: base.count });
+                return;
+              }
+              const progress = Math.min(100, (base.count / POSE_BASELINE_TARGET) * 100);
+              updatePoseBaselineProgressDisplay(progress);
+              updateStatus(`Baseline calibration complete! Stabilising head pose… ${Math.round(progress)}%`, STATUS_OK);
+              debugLog('pose-baseline-progress', { count: base.count, progress, tracker: window.webgazer?.getTracker?.()?.clm ? 'clmtrackr' : window.webgazer?.getTracker?.()?.name || 'unknown' });
+              if (!state.poseBaselineFallbackTriggered && base.count === 0 && state.poseBaselineMonitorStartedAt && (performance.now() - state.poseBaselineMonitorStartedAt) > POSE_BASELINE_FALLBACK_MS) {
+                base.ready = true;
+                base.count = POSE_BASELINE_MIN_FRAMES;
+                base.yaw = 0;
+                base.pitch = 0;
+                base.roll = 0;
+                markPoseBaselineUnavailable();
+                clearPoseBaselineMonitor();
+                updateStatus('Head pose landmarks unavailable — proceeding with a neutral pose baseline.', STATUS_WARN);
+                debugLog('pose-baseline-fallback', { tracker: window.webgazer?.getCurrentTracker?.() || window.webgazer?.getTracker?.()?.name });
+                if (controls.poseBtn) {
+                  controls.poseBtn.disabled = false;
+                  controls.poseBtn.focus({ preventScroll: true });
+                }
+                if (controls.refineBtn) controls.refineBtn.disabled = false;
+              }
+            }, 180);
           }
         } else {
-          updateStatus('Baseline calibration complete! Hold centered while we stabilise your neutral pose…', STATUS_OK);
-          const base = state.pose.baseline;
-          const initialProgress = base ? Math.min(100, (base.count / POSE_BASELINE_TARGET) * 100) : 0;
-          updatePoseBaselineProgressDisplay(initialProgress);
-          state.poseBaselineMonitorStartedAt = performance.now();
-          state.poseBaselineReadyMonitor = setInterval(() => {
-            const base = state.pose.baseline;
-            if (!base) return;
-            if (base.ready) {
-              clearPoseBaselineMonitor();
-              updateStatus('Neutral pose locked in! When ready, click “Run Pose Calibration”.', STATUS_OK);
-              if (controls.poseBtn) {
-                controls.poseBtn.disabled = false;
-                controls.poseBtn.focus({ preventScroll: true });
-              }
-              if (controls.refineBtn) controls.refineBtn.disabled = false;
-              debugLog('pose-baseline-ready', { count: base.count });
-              return;
-            }
-            const progress = Math.min(100, (base.count / POSE_BASELINE_TARGET) * 100);
-            updatePoseBaselineProgressDisplay(progress);
-            updateStatus(`Baseline calibration complete! Stabilising head pose… ${Math.round(progress)}%`, STATUS_OK);
-            debugLog('pose-baseline-progress', { count: base.count, progress, tracker: window.webgazer?.getTracker?.()?.clm ? 'clmtrackr' : window.webgazer?.getTracker?.()?.name || 'unknown' });
-            if (!state.poseBaselineFallbackTriggered && base.count === 0 && state.poseBaselineMonitorStartedAt && (performance.now() - state.poseBaselineMonitorStartedAt) > POSE_BASELINE_FALLBACK_MS) {
-              base.ready = true;
-              base.count = POSE_BASELINE_MIN_FRAMES;
-              base.yaw = 0;
-              base.pitch = 0;
-              base.roll = 0;
-              markPoseBaselineUnavailable();
-              clearPoseBaselineMonitor();
-              updateStatus('Head pose landmarks unavailable — proceeding with a neutral pose baseline.', STATUS_WARN);
-              debugLog('pose-baseline-fallback', { tracker: window.webgazer?.getCurrentTracker?.() || window.webgazer?.getTracker?.()?.name });
-              if (controls.poseBtn) {
-                controls.poseBtn.disabled = false;
-                controls.poseBtn.focus({ preventScroll: true });
-              }
-              if (controls.refineBtn) controls.refineBtn.disabled = false;
-            }
-          }, 180);
+          if (controls.refineBtn) controls.refineBtn.disabled = false;
+          if (controls.beginBtn) controls.beginBtn.disabled = false;
+          updateStatus('Baseline calibration complete! Begin hover or fine-tune when ready.', STATUS_OK);
         }
         state.indicatorAlwaysOn = true;
         updateCustomGazeIndicator(state.smoothing.smoothed || null);
@@ -1985,6 +2155,16 @@ function handleCalibrationClick(event, point) {
       state.calibrationOverlay.parentElement.removeChild(state.calibrationOverlay);
     }
     state.calibrationOverlay = null;
+    const vv = window.visualViewport;
+    if (vv && state._zoomListener) {
+      try {
+        vv.removeEventListener('resize', state._zoomListener);
+      } catch (_err) {
+        // ignore removal failures
+      }
+    }
+    state._zoomListener = null;
+    state._zoomBaseline = null;
   }
 
   async function requestSummaryForUrl(url, token) {
@@ -2201,6 +2381,146 @@ function handleCalibrationClick(event, point) {
     return { videoCanvas: null, videoPreview: null };
   }
 
+  function _applyMirror(el, mirrored) {
+    if (!el) return;
+    el.style.transformOrigin = 'left top';
+    el.style.transform = mirrored ? 'scaleX(-1)' : 'none';
+  }
+
+  function ensurePreviewDock() {
+    let dock = document.getElementById('wg-preview-dock');
+    if (!dock) {
+      dock = document.createElement('div');
+      dock.id = 'wg-preview-dock';
+      Object.assign(dock.style, {
+        position: 'fixed',
+        right: '16px',
+        bottom: '16px',
+        width: `${UI_PREVIEW_WIDTH_PX}px`,
+        height: 'auto',
+        aspectRatio: '4 / 3',
+        boxShadow: '0 8px 24px rgba(0,0,0,.25)',
+        borderRadius: '12px',
+        overflow: 'hidden',
+        background: '#000',
+        zIndex: '2147483640',
+        display: FEATURES.showLivePreview ? 'block' : 'none',
+        pointerEvents: 'none'
+      });
+      dock.setAttribute('aria-hidden', 'true');
+      document.body.appendChild(dock);
+    } else {
+      dock.style.display = FEATURES.showLivePreview ? 'block' : 'none';
+    }
+    return dock;
+  }
+
+  function attachWgNodesToDock() {
+    const dock = ensurePreviewDock();
+    const src = _resolveTrackTarget(null);
+    const videoEl = document.getElementById('webgazerVideo') || document.getElementById('webgazerVideoFeed');
+    const videoCanvas = document.getElementById('webgazerVideoCanvas');
+    const faceOverlay = document.getElementById('webgazerFaceOverlay');
+    const faceFeedback = document.getElementById('webgazerFaceFeedbackBox');
+    const width = src.width || 640;
+    const height = src.height || 480;
+
+    if (videoEl) {
+      Object.assign(videoEl.style, {
+        position: 'fixed',
+        top: '0px',
+        left: '-10000px',
+        width: `${width}px`,
+        height: `${height}px`,
+        opacity: '0',
+        pointerEvents: 'none'
+      });
+    }
+
+    const nodes = [videoCanvas, faceOverlay, faceFeedback];
+    nodes.forEach((node, index) => {
+      if (!node) return;
+      if (node.width !== undefined) {
+        if (node.width !== width) node.width = width;
+        if (node.height !== height) node.height = height;
+      }
+      if (FEATURES.showLivePreview) {
+        Object.assign(node.style, {
+          position: 'absolute',
+          top: '0',
+          left: '0',
+          width: '100%',
+          height: '100%',
+          display: 'block',
+          pointerEvents: 'none',
+          opacity: index === 0 ? '1' : '1',
+          zIndex: String(index + 1)
+        });
+        if (node.parentElement !== dock) {
+          dock.appendChild(node);
+        }
+      } else {
+        Object.assign(node.style, {
+          position: 'fixed',
+          top: '16px',
+          left: '16px',
+          width: `${width}px`,
+          height: `${height}px`,
+          pointerEvents: 'none',
+          display: 'block',
+          zIndex: String(2147483631 + index),
+          opacity: index === 0 ? '0' : '1'
+        });
+        if (node.parentElement !== document.body) {
+          document.body.appendChild(node);
+        }
+      }
+    });
+
+    dock.style.display = FEATURES.showLivePreview ? 'block' : 'none';
+  }
+
+  function syncPreviewTransformToVideo() {
+    const dock = document.getElementById('wg-preview-dock');
+    if (!dock) return;
+    const mirrored = _isFeedMirrored();
+    dock.style.transformOrigin = 'center center';
+    dock.style.transform = mirrored ? 'scaleX(-1)' : 'none';
+  }
+
+  function syncWgCanvasSizes() {
+    const src = _resolveTrackTarget(null);
+    if (!src.videoReady) return;
+
+    const w = src.width, h = src.height;
+
+    const videoCanvas = document.getElementById('webgazerVideoCanvas');
+    const faceOverlay = document.getElementById('webgazerFaceOverlay');
+    const faceFeedback = document.getElementById('webgazerFaceFeedbackBox');
+    const videoFeed = document.getElementById('webgazerVideoFeed');
+
+    const setSize = (el) => {
+      if (!el) return;
+      if (el.width !== undefined) {
+        if (el.width !== w) el.width = w;
+        if (el.height !== h) el.height = h;
+      }
+      el.style.width = `${w}px`;
+      el.style.height = `${h}px`;
+    };
+
+    setSize(videoCanvas);
+    setSize(faceOverlay);
+    setSize(faceFeedback);
+    if (videoFeed) {
+      videoFeed.style.width = `${w}px`;
+      videoFeed.style.height = `${h}px`;
+    }
+
+    attachWgNodesToDock();
+    syncPreviewTransformToVideo();
+  }
+
   function ensureWebgazerSupportCanvases() {
     let container = document.getElementById('webgazerVideoContainer');
     if (!container) {
@@ -2288,16 +2608,49 @@ function handleCalibrationClick(event, point) {
         position: 'fixed',
         top: '16px',
         left: '16px',
-        width: videoFeed.videoWidth ? `${videoFeed.videoWidth}px` : '320px',
-        height: videoFeed.videoHeight ? `${videoFeed.videoHeight}px` : '240px',
         opacity: '1',
         pointerEvents: 'none',
         zIndex: '2147483632'
       });
     }
 
-    // Mirror WebGazer defaults so internal cleanup succeeds.
-    window.webgazer?.params && (window.webgazer.params.showVideoPreview = false);
+    ensurePreviewDock();
+    syncWgCanvasSizes();
+    attachWgNodesToDock();
+    syncPreviewTransformToVideo();
+
+    if (videoFeed) {
+      let syncHandler = videoFeed.__wgCanvasSyncHandler;
+      if (!syncHandler) {
+        syncHandler = () => {
+          try {
+            syncWgCanvasSizes();
+            attachWgNodesToDock();
+            syncPreviewTransformToVideo();
+          } catch (_) {
+            // ignore sync errors
+          }
+        };
+        videoFeed.__wgCanvasSyncHandler = syncHandler;
+        videoFeed.addEventListener('loadeddata', syncHandler, { once: true });
+        videoFeed.addEventListener('resize', syncHandler);
+        window.addEventListener('resize', syncHandler);
+      }
+      setTimeout(syncHandler, 200);
+    }
+    const vv = window.visualViewport;
+    if (vv && !vv.__wgPreviewSyncHandler) {
+      const viewportHandler = () => {
+        try {
+          attachWgNodesToDock();
+          syncPreviewTransformToVideo();
+        } catch (_) {
+          // ignore viewport sync issues
+        }
+      };
+      vv.addEventListener('resize', viewportHandler);
+      vv.__wgPreviewSyncHandler = viewportHandler;
+    }
   }
 
   function sendRuntimeMessage(payload) {
@@ -2447,7 +2800,7 @@ function updateCustomGazeIndicator(sample) {
 
     const diag = Math.hypot(window.innerWidth || 0, window.innerHeight || 0) || 2000;
     const calibrationCount = state.calibrationSamples ? state.calibrationSamples.length : 0;
-    const relStd = calibrationCount < 12 ? 0.08 : calibrationCount < 24 ? 0.06 : 0.05;
+    const relStd = calibrationCount < 12 ? 0.06 : calibrationCount < 24 ? 0.045 : 0.035;
     const maxStdPx = Math.max(60, diag * relStd);
     const maxSpeed = Math.max(6000, diag * 8);
 
@@ -2527,21 +2880,11 @@ function updateCustomGazeIndicator(sample) {
     }
 
     const rect = bestAnchor.getBoundingClientRect();
-    if (!pointInsideRectWithPadding(centroid, rect, RECT_PADDING_PX)) {
+    if (!anchorWithinHalo(centroid, rect)) {
       return { anchor: null, centroid: null };
     }
 
     return { anchor: bestAnchor, centroid };
-  }
-
-  function pointInsideRectWithPadding(point, rect, padding) {
-    if (!point || !rect) return false;
-    return (
-      point.x >= rect.left - padding &&
-      point.x <= rect.right + padding &&
-      point.y >= rect.top - padding &&
-      point.y <= rect.bottom + padding
-    );
   }
 
   function smoothCalibratedPoint(point) {
@@ -2621,6 +2964,7 @@ function updateCustomGazeIndicator(sample) {
   }
 
   function extractHeadPose() {
+    if (!FEATURES.pose) return null;
     try {
       const tracker = window.webgazer?.getTracker?.();
       const clm = tracker?.clm;
@@ -2682,6 +3026,7 @@ function updateCustomGazeIndicator(sample) {
   }
 
   function updatePoseState(measurement) {
+    if (!FEATURES.pose) return;
     const now = performance.now();
     if (!measurement || measurement.confidence < POSE_CONFIDENCE_THRESHOLD) {
       const missingCooldownMs = 15000;
@@ -2711,6 +3056,7 @@ function updateCustomGazeIndicator(sample) {
   }
 
   function maybeWarmPoseBaseline() {
+    if (!FEATURES.pose) return;
     const poseState = state.pose;
     const baseline = poseState.baseline;
     const smoothed = poseState.smoothed;

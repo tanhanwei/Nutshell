@@ -425,3 +425,15 @@ hr {
   color: #666;
   margin: 0;
 }
+#wg-preview-dock {
+  max-width: min(40vw, 480px);
+  max-height: 40vh;
+}
+
+@media (max-width: 480px) {
+  #wg-preview-dock {
+    right: 8px;
+    bottom: 8px;
+    width: 45vw;
+  }
+}
