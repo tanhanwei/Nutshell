@@ -603,19 +603,20 @@
                 return;
               }
 
-              const { feedReady } = _resolveTrackTarget(null);
-              if (!feedReady) {
+              const sourceStatus = _resolveTrackTarget(null);
+              if (!sourceStatus.videoReady) {
                 return;
               }
 
               const health = typeof tracker?.getHealth === 'function' ? tracker.getHealth() : null;
               const recent = Boolean(health?.recent);
               const frames = Number.isFinite(health?.frames) ? health.frames : 0;
-              const lostMs = Number.isFinite(health?.lostMs) ? health.lostMs : Infinity;
               const points = Number.isFinite(health?.points) ? health.points : 0;
+              const lastAt = Number.isFinite(health?.lastAt) ? health.lastAt : 0;
+              const lostMs = lastAt ? (performance.now() - lastAt) : Infinity;
 
               if (recent || points >= 32) {
-                debugLog('tracker-health-ok', { recent, frames, lostMs, points });
+                debugLog('tracker-health-ok', { recent, frames, lostMs, points, lastAt });
                 clearInterval(state.trackerFallbackTimer);
                 state.trackerFallbackTimer = null;
                 return;
@@ -625,7 +626,7 @@
                 await gaze.setTracker('TFFacemesh');
                 clearInterval(state.trackerFallbackTimer);
                 state.trackerFallbackTimer = null;
-                debugLog('tracker-switched-fallback', { to: 'TFFacemesh', reason: { frames, lostMs, points } });
+                debugLog('tracker-switched-fallback', { to: 'TFFacemesh', reason: { frames, lostMs, points, lastAt } });
               }
             } catch (error) {
               debugLog('tracker-fallback-error', { error: error?.message || String(error) });
@@ -1057,17 +1058,49 @@
   }
 
   function _resolveTrackTarget(imageCanvas) {
-    const feed = document.getElementById('webgazerVideoFeed');
-    const feedReady = Boolean(
-      feed &&
-        feed.readyState >= 2 &&
-        (feed.videoWidth > 0 && feed.videoHeight > 0)
+    const video = document.getElementById('webgazerVideo') || document.getElementById('webgazerVideoFeed') || null;
+    const canvas = imageCanvas || document.getElementById('webgazerVideoCanvas') || null;
+    const haveVideo = Boolean(
+      video &&
+      (video.readyState >= (video.HAVE_CURRENT_DATA || 2)) &&
+      video.videoWidth > 0 &&
+      video.videoHeight > 0
     );
-    const target = feedReady ? feed : imageCanvas;
-    const width = (target && (target.videoWidth || target.width)) || 0;
-    const height = (target && (target.videoHeight || target.height)) || 0;
+    const target = haveVideo ? video : null;
+    const width = target ? (target.videoWidth || target.width || 0) : 0;
+    const height = target ? (target.videoHeight || target.height || 0) : 0;
+    return {
+      video,
+      canvas,
+      target,
+      videoReady: haveVideo,
+      width,
+      height
+    };
+  }
 
-    return { target, feedReady, width, height };
+  function _isFeedMirrored() {
+    try {
+      const wg = window.webgazer;
+      if (wg && wg.params && typeof wg.params.flipVideo === 'boolean') {
+        return Boolean(wg.params.flipVideo);
+      }
+      const feed = document.getElementById('webgazerVideoFeed');
+      if (!feed) return false;
+      const cs = getComputedStyle(feed);
+      const transform = cs.transform || cs.webkitTransform || '';
+      if (!transform || transform === 'none') {
+        return false;
+      }
+      const match = transform.match(/matrix\(([^)]+)\)/);
+      if (match) {
+        const first = parseFloat(match[1].split(',')[0]);
+        return Number.isFinite(first) && first < 0;
+      }
+      return /scaleX\(\s*-1/.test(transform) || /scale\(\s*-1\s*,\s*1/.test(transform);
+    } catch (_error) {
+      return false;
+    }
   }
 
   function ensureClmTrackerModuleRegistered() {
@@ -1103,13 +1136,14 @@
         this.clm = null;
       }
       this.positionsArray = null;
-      this.lastLandmarksAt = 0;
       this.applyKalman = applyKalmanByDefault;
       this.started = false;
-      this._lostSince = null;
-      this._framesSinceInit = 0;
-      this._webglRetried = false;
-      this._lastResetAt = 0;
+      this._startIssued = false;
+      this._starting = false;
+      this._startArmed = false;
+      this._startHandler = null;
+      this._frames = 0;
+      this.lastLandmarksAt = 0;
       this.createKalmanFilters();
     };
 
@@ -1131,27 +1165,60 @@
     ClmTrackrAdapter.prototype.trackFrame = function(imageCanvas) {
       if (!this.clm) return null;
 
-      const { target, width, height } = _resolveTrackTarget(imageCanvas);
-      if (!target || width === 0 || height === 0) {
-        if (!this._lostSince) {
-          this._lostSince = performance.now();
-        }
-        return null;
-      }
+      const { video, target, videoReady } = _resolveTrackTarget(imageCanvas);
 
-      if (!this.started) {
-        this.started = true;
-        this._framesSinceInit = 0;
-      }
-
-      try {
-        if (typeof this.clm.track === 'function') {
-          this.clm.track(target);
-          this._framesSinceInit += 1;
+      if (!this._startIssued) {
+        if (!video || !videoReady) {
+          if (video && !this._startArmed) {
+            this._startArmed = true;
+            const onReady = () => {
+              if (this._startIssued || this._starting) return;
+              this._starting = true;
+              try { video.removeEventListener('loadeddata', this._startHandler); } catch (_err) {}
+              try { video.removeEventListener('canplay', this._startHandler); } catch (_err) {}
+              this._startHandler = null;
+              try {
+                this.clm.start(video);
+                this._startIssued = true;
+                this._frames = 0;
+                this.lastLandmarksAt = performance.now();
+                debugLog('clmtrackr-started', { w: video.videoWidth, h: video.videoHeight });
+              } catch (error) {
+                debugLog('clmtrackr-start-error', { error: error?.message || String(error) });
+              } finally {
+                this._starting = false;
+                this._startArmed = false;
+              }
+            };
+            this._startHandler = onReady;
+            video.addEventListener('loadeddata', onReady);
+            video.addEventListener('canplay', onReady);
+          }
+          return null;
         }
-      } catch (error) {
-        debugLog('clmtrackr-track-error', { error: error?.message || String(error) });
-        return null;
+
+        if (this._startHandler && video) {
+          try { video.removeEventListener('loadeddata', this._startHandler); } catch (_err) {}
+          try { video.removeEventListener('canplay', this._startHandler); } catch (_err) {}
+          this._startHandler = null;
+        }
+
+        try {
+          this._starting = true;
+          this.clm.start(target || video);
+          this._startIssued = true;
+          this._frames = 0;
+          this.lastLandmarksAt = performance.now();
+          debugLog('clmtrackr-started', { w: (target || video).videoWidth, h: (target || video).videoHeight });
+        } catch (error) {
+          debugLog('clmtrackr-start-error', { error: error?.message || String(error) });
+          this._starting = false;
+          this._startArmed = false;
+          this._startHandler = null;
+          return null;
+        }
+        this._starting = false;
+        this._startArmed = false;
       }
 
       let positions = null;
@@ -1161,50 +1228,13 @@
         debugLog('clmtrackr-getPositions-error', { error: error?.message || String(error) });
       }
 
-      const hasPoints = Array.isArray(positions) && positions.length >= 32;
-      const now = performance.now();
-
-      if (hasPoints) {
-        this._lostSince = null;
-        this.lastLandmarksAt = now;
+      this._frames += 1;
+      if (Array.isArray(positions) && positions.length) {
+        this.lastLandmarksAt = performance.now();
+        if (!this.started) {
+          this.started = true;
+        }
         return positions;
-      }
-
-      if (!this._lostSince) {
-        this._lostSince = now;
-      }
-
-      const lostMs = now - this._lostSince;
-      if (lostMs > 600 && lostMs < 1500) {
-        if (!this._lastResetAt || (now - this._lastResetAt) > 500) {
-          try {
-            this.clm.reset?.();
-            this.positionsArray = null;
-          } catch (error) {
-            debugLog('clmtrackr-reset-warning', { error: error?.message || String(error) });
-          } finally {
-            this._lastResetAt = now;
-          }
-        }
-      } else if (lostMs >= 1500 && !this._webglRetried) {
-        try {
-          this._webglRetried = true;
-          const newParams = Object.assign({ useWebGL: false }, wg.params?.clmParams || {});
-          this.clm.stop?.();
-          this.clm.reset?.();
-          this.clm = new window.clm.tracker(newParams);
-          const model = window.pModel || (window.clm && window.clm.models && window.clm.models.faceModel);
-          this.clm.init(model);
-          this.createKalmanFilters();
-          this.positionsArray = null;
-          this._framesSinceInit = 0;
-          this._lostSince = null;
-          this.started = false;
-          this._lastResetAt = 0;
-          this.lastLandmarksAt = 0;
-        } catch (error) {
-          debugLog('clmtrackr-webgl-fallback-error', { error: error?.message || String(error) });
-        }
       }
 
       return null;
@@ -1213,16 +1243,19 @@
     ClmTrackrAdapter.prototype.getHealth = function() {
       const now = performance.now();
       const lastAt = this.lastLandmarksAt || 0;
-      const frames = this._framesSinceInit || 0;
-      const lostMs = this._lostSince ? (now - this._lostSince) : 0;
-      const points = Array.isArray(this.positionsArray) ? this.positionsArray.length : 0;
+      const frames = this._frames || 0;
+      let points = 0;
+      try {
+        const latest = this.clm?.getCurrentPosition?.();
+        points = Array.isArray(latest) ? latest.length : 0;
+      } catch (_error) {
+        points = Array.isArray(this.positionsArray) ? this.positionsArray.length : 0;
+      }
       return {
         recent: Boolean(lastAt && (now - lastAt) < 1600),
         lastAt,
-        lostMs,
         frames,
-        points,
-        webglRetried: Boolean(this._webglRetried)
+        points
       };
     };
 
@@ -1244,20 +1277,25 @@
       }
 
       this.positionsArray = positions;
+      const sourceInfo = _resolveTrackTarget(imageCanvas);
+      const sourceWidth = sourceInfo.width || imageCanvas.width;
+      const sourceHeight = sourceInfo.height || imageCanvas.height;
+      const scaleX = sourceWidth ? (imageCanvas.width / sourceWidth) : 1;
+      const scaleY = sourceHeight ? (imageCanvas.height / sourceHeight) : 1;
 
       try {
         const overlay = document.getElementById('webgazerFaceOverlay');
         if (overlay && overlay.getContext) {
-          const sourceInfo = _resolveTrackTarget(imageCanvas);
-          const overlayWidth = sourceInfo.width || imageCanvas.width || overlay.width || 0;
-          const overlayHeight = sourceInfo.height || imageCanvas.height || overlay.height || 0;
+          const overlayWidth = imageCanvas.width || overlay.width || 0;
+          const overlayHeight = imageCanvas.height || overlay.height || 0;
           if (overlayWidth > 0 && overlayHeight > 0) {
             overlay.width = overlayWidth;
             overlay.height = overlayHeight;
             const overlayCtx = overlay.getContext('2d', { willReadFrequently: true });
             if (overlayCtx) {
               overlayCtx.clearRect(0, 0, overlayWidth, overlayHeight);
-              this.drawFaceOverlay(overlayCtx, positions);
+              const scaledPositions = positions.map(([x, y]) => [x * scaleX, y * scaleY]);
+              this.drawFaceOverlay(overlayCtx, scaledPositions);
               Object.assign(overlay.style, {
                 position: 'fixed',
                 top: '16px',
@@ -1273,14 +1311,14 @@
         // overlay drawing failures are non-fatal during diagnostics
       }
 
-      let leftOriginX = positions[23][0];
-      let leftOriginY = positions[24][1];
-      let leftWidth = positions[25][0] - positions[23][0];
-      let leftHeight = positions[26][1] - positions[24][1];
-      let rightOriginX = positions[30][0];
-      let rightOriginY = positions[29][1];
-      let rightWidth = positions[28][0] - positions[30][0];
-      let rightHeight = positions[31][1] - positions[29][1];
+      let leftOriginX = positions[23][0] * scaleX;
+      let leftOriginY = positions[24][1] * scaleY;
+      let leftWidth = (positions[25][0] - positions[23][0]) * scaleX;
+      let leftHeight = (positions[26][1] - positions[24][1]) * scaleY;
+      let rightOriginX = positions[30][0] * scaleX;
+      let rightOriginY = positions[29][1] * scaleY;
+      let rightWidth = (positions[28][0] - positions[30][0]) * scaleX;
+      let rightHeight = (positions[31][1] - positions[29][1]) * scaleY;
 
       if (this.applyKalman && this.leftKalman && this.rightKalman) {
         const leftBox = this.leftKalman.update([leftOriginX, leftOriginY, leftOriginX + leftWidth, leftOriginY + leftHeight]);
@@ -1361,12 +1399,18 @@
           debugLog('clmtrackr-stop-error', { error: error?.message || String(error) });
         }
       }
+      const video = document.getElementById('webgazerVideo') || document.getElementById('webgazerVideoFeed') || null;
+      if (this._startHandler && video) {
+        try { video.removeEventListener('loadeddata', this._startHandler); } catch (_err) {}
+        try { video.removeEventListener('canplay', this._startHandler); } catch (_err) {}
+      }
       this.positionsArray = null;
       this.started = false;
-      this._lostSince = null;
-      this._framesSinceInit = 0;
-      this._webglRetried = false;
-      this._lastResetAt = 0;
+      this._startIssued = false;
+      this._starting = false;
+      this._startArmed = false;
+      this._startHandler = null;
+      this._frames = 0;
       this.lastLandmarksAt = 0;
       this.createKalmanFilters();
     };
@@ -2475,18 +2519,22 @@ function updateCustomGazeIndicator(sample) {
         return null;
       }
       const positions = clm.getCurrentPosition();
-      if (!positions || positions.length < 55) {
+      if (!positions || positions.length <= 62) {
         return null;
       }
 
-      const leftEye = positions[27] || positions[23];
-      const rightEye = positions[32] || positions[28];
+      const leftEye = positions[27];
+      const rightEye = positions[32];
       const noseTip = positions[62] || positions[33];
-      const chin = positions[7] || positions[14];
-      if (!leftEye || !rightEye || !noseTip) {
+      const chin = positions[7];
+      if (!leftEye || !rightEye || !noseTip || !chin) {
         return null;
       }
 
+      const eyeCenter = {
+        x: (leftEye[0] + rightEye[0]) / 2,
+        y: (leftEye[1] + rightEye[1]) / 2
+      };
       const eyeVector = {
         x: rightEye[0] - leftEye[0],
         y: rightEye[1] - leftEye[1]
@@ -2496,27 +2544,30 @@ function updateCustomGazeIndicator(sample) {
         return null;
       }
 
-      const eyeCenter = {
-        x: (leftEye[0] + rightEye[0]) / 2,
-        y: (leftEye[1] + rightEye[1]) / 2
-      };
+      let yaw = (noseTip[0] - eyeCenter.x) / eyeDistance;
+      let pitch = (noseTip[1] - eyeCenter.y) / eyeDistance - ((chin[1] - eyeCenter.y) / (2 * eyeDistance));
+      let roll = Math.atan2(eyeVector.y, eyeVector.x);
 
-      const roll = Math.atan2(eyeVector.y, eyeVector.x);
-      const yaw = clamp((noseTip[0] - eyeCenter.x) / eyeDistance, -0.7, 0.7);
-      let pitch = (noseTip[1] - eyeCenter.y) / eyeDistance;
-      if (chin) {
-        pitch -= (chin[1] - eyeCenter.y) / (2 * eyeDistance);
+      const mirrored = _isFeedMirrored();
+      if (mirrored) {
+        yaw = -yaw;
+        roll = -roll;
       }
+
+      yaw = clamp(yaw, -0.7, 0.7);
       pitch = clamp(pitch, -0.7, 0.7);
 
+      if (state?.poseDebug) {
+        const now = performance.now();
+        if (!state.poseDebug.lastMeasurementLog || (now - state.poseDebug.lastMeasurementLog) > 1200) {
+          debugLog('pose-measurement', { yaw, pitch, roll, mirrored });
+          state.poseDebug.lastMeasurementLog = now;
+        }
+      }
+
       const confidence = Math.min(1, positions.length / 70);
-      return {
-        yaw,
-        pitch,
-        roll,
-        confidence
-      };
-    } catch (error) {
+      return { yaw, pitch, roll, confidence };
+    } catch (_error) {
       return null;
     }
   }
