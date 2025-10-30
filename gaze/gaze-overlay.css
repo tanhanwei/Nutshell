@@ -1,0 +1,156 @@
+#gaze-calibration-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 12, 24, 0.55);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(2px);
+  z-index: 2147483646;
+  pointer-events: none;
+  color: #f5f7fa;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+#gaze-calibration-overlay.gaze-overlay-visible {
+  display: flex;
+  pointer-events: auto;
+}
+
+#gaze-calibration-overlay .gaze-overlay-content {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.gaze-overlay-message {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 18px;
+  font-weight: 600;
+  background: rgba(12, 16, 41, 0.9);
+  padding: 12px 20px;
+  border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+}
+
+.gaze-calibration-dot {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  margin-left: -9px;
+  margin-top: -9px;
+  border-radius: 999px;
+  background: #5aa7ff;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.gaze-calibration-dot.gaze-calibration-active {
+  transform: scale(1.3);
+  background: #2f80ff;
+}
+
+.gaze-calibration-dot::after {
+  content: '';
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 6px;
+  background: #fff;
+}
+
+#gaze-status-hud {
+  position: fixed;
+  top: 12px;
+  right: 16px;
+  z-index: 2147483645;
+  background: rgba(16, 19, 43, 0.88);
+  color: #dbe6ff;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+
+#gaze-status-hud .gaze-status-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 8px;
+  background: #ffb347;
+}
+
+#gaze-status-hud[data-phase='live'] .gaze-status-indicator {
+  background: #6ce56c;
+}
+
+#gaze-status-hud[data-phase='calibrating'] .gaze-status-indicator {
+  background: #ffb347;
+}
+
+#gaze-status-hud[data-phase='loading'] .gaze-status-indicator {
+  background: #f55b5b;
+}
+
+#gaze-status-hud[data-phase='ready'] .gaze-status-indicator {
+  background: #9aa7c0;
+}
+
+#gaze-status-hud span {
+  white-space: nowrap;
+}
+
+/* --- Gaze debug visuals --- */
+#gaze-pointer {
+  position: fixed;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: rgba(255, 0, 0, 0.9);
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.35);
+  transform: translate(-50%, -50%);
+  z-index: 2147483647;
+  pointer-events: none;
+  display: none;
+}
+
+#gaze-debug-hud {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-size: 12px;
+  line-height: 1.3;
+  padding: 6px 8px;
+  border-radius: 8px;
+  z-index: 2147483647;
+  display: none;
+  white-space: nowrap;
+}
+
+#gaze-cam {
+  position: fixed;
+  right: 10px;
+  bottom: 10px;
+  width: 260px;
+  height: 195px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
+  z-index: 2147483647;
+  display: none;
+}

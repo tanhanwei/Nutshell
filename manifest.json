@@ -26,6 +26,16 @@
       "js": ["youtube/youtube-content-bridge.js"],
       "run_at": "document_start",
       "all_frames": false
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "lib/Readability.js",
+        "gaze/gaze-core.js",
+        "gaze/gaze-dwell.js",
+        "gaze/gaze-overlay.js"
+      ],
+      "run_at": "document_idle"
     }
   ],
   "side_panel": {
@@ -42,6 +52,13 @@
       "twitter/twitter-interceptor.js",
       "lib/webgazer.js",
       "vendor/clmtrackr.js"
+    ],
+    "matches": ["<all_urls>"]
+  }, {
+    "resources": [
+      "gaze/gaze-overlay.css",
+      "gaze/human/human.esm.js",
+      "gaze/human/models/*"
     ],
     "matches": ["<all_urls>"]
   }]
