@@ -32,6 +32,7 @@
       "js": [
         "lib/Readability.js",
         "gaze/gaze-core.js",
+        "gaze/head-cal.js",
         "gaze/gaze-dwell.js",
         "gaze/gaze-overlay.js"
       ],

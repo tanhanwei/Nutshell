@@ -38,8 +38,8 @@
   let previewVisible = true;
   let sampleCount = 0;
 
-  if (typeof window.__gazeNoseFallback !== 'boolean') {
-    window.__gazeNoseFallback = false;
+  if (typeof window.__gazeHeadMode !== 'boolean') {
+    window.__gazeHeadMode = false;
   }
 
   function injectStyles() {
@@ -111,9 +111,6 @@
       detail: { on: previewVisible }
     }));
     refreshDebugHud();
-    window.dispatchEvent(new CustomEvent('gaze:preview-toggle', {
-      detail: { on: previewVisible }
-    }));
   }
 
   function ensureDebugElements() {
@@ -328,11 +325,6 @@
         startCalibration();
         return;
       }
-      if (code === 'KeyH') {
-        event.preventDefault();
-        setHudVisible(!hudVisible);
-        return;
-      }
       if (code === 'KeyP') {
         event.preventDefault();
         setPointerVisible(!pointerVisible);
@@ -346,17 +338,26 @@
       }
       if (code === 'KeyN') {
         event.preventDefault();
-        window.__gazeNoseFallback = !window.__gazeNoseFallback;
+        window.__gazeHeadMode = !window.__gazeHeadMode;
         statusPhase = 'live';
-        statusNote = window.__gazeNoseFallback ? 'nose-pointer' : 'iris';
+        statusNote = window.__gazeHeadMode ? 'head-pointer' : 'iris';
         refreshDebugHud();
         window.dispatchEvent(new CustomEvent('gaze:status', {
           detail: {
             phase: 'live',
-            note: window.__gazeNoseFallback ? 'nose-pointer' : 'iris'
+            note: window.__gazeHeadMode ? 'head-pointer' : 'iris'
           }
         }));
-        console.debug('[GazeOverlay] Nose fallback', window.__gazeNoseFallback ? 'ENABLED' : 'DISABLED');
+        console.debug('[GazeOverlay] Head pointer mode', window.__gazeHeadMode ? 'ENABLED' : 'DISABLED');
+        return;
+      }
+    }
+    if (!event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey) {
+      const code = event.code || event.key;
+      if (code === 'KeyH') {
+        event.preventDefault();
+        setHudVisible(!hudVisible);
+        console.debug('[GazeOverlay] HUD', hudVisible ? 'ON' : 'OFF');
         return;
       }
     }
@@ -446,5 +447,6 @@
 
   ensureOverlay();
   ensureDebugElements();
+  setPreviewVisible(previewVisible);
   refreshDebugHud();
 })();

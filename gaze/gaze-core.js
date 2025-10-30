@@ -14,6 +14,10 @@
   const POINT_THROTTLE_MS = 33;
   const SMOOTHING_ALPHA = 0.35;
   const MAX_CALIBRATION_SAMPLES = 4000;
+  const HEAD_SMOOTH_ALPHA = 0.25;
+  const BLINK_LEFT_THRESHOLD_MS = 1000;
+  const BLINK_RIGHT_THRESHOLD_MS = 2000;
+  const BLINK_RELEASE_EVENT = 'blink:released';
 
   let human = null;
   let video = null;
@@ -34,6 +38,14 @@
   let previewOn = true;
   let probePrinted = false;
   let missingFeatureWarned = false;
+  let headCal = null;
+  let headSmoothX = null;
+  let headSmoothY = null;
+  let headModeWarned = false;
+  let earCal = null;
+  let earSampleBuffer = [];
+  let blinkClosedAt = null;
+  let blinkHoldEmitted = false;
 
   let gazeEnabled = false;
   if (!Array.isArray(window.__gazeW)) {
@@ -45,8 +57,14 @@
   if (typeof window.__gazeCalibrating !== 'boolean') {
     window.__gazeCalibrating = false;
   }
-  if (typeof window.__gazeNoseFallback !== 'boolean') {
-    window.__gazeNoseFallback = false;
+  if (typeof window.__gazeHeadMode !== 'boolean') {
+    window.__gazeHeadMode = false;
+  }
+  if (typeof window.__gazeHeadCalActive !== 'boolean') {
+    window.__gazeHeadCalActive = false;
+  }
+  if (!window.__lastHeadAngles) {
+    window.__lastHeadAngles = { yaw: 0, pitch: 0 };
   }
   if (typeof window.__gazePredict !== 'function') {
     window.__gazePredict = (feat) => gazePredictFromWB(feat, window.__gazeW, window.__gazeB, window.__gazeNorm);
@@ -102,6 +120,150 @@
     }
     const normalized = matrix.map((row) => row.map((value, d) => (value - mean[d]) / std[d]));
     return { normalized, mean, std };
+  }
+
+  function mapYawPitchToXY(yaw, pitch, cal) {
+    if (!cal) return null;
+    if (!Number.isFinite(yaw) || !Number.isFinite(pitch)) return null;
+    const leftRange = Math.max(1e-3, cal.left || 0.01);
+    const rightRange = Math.max(1e-3, cal.right || 0.01);
+    const upRange = Math.max(1e-3, cal.up || 0.01);
+    const downRange = Math.max(1e-3, cal.down || 0.01);
+
+    const yawDelta = yaw - (cal.y0 || 0);
+    const pitchDelta = pitch - (cal.p0 || 0);
+
+    let nx;
+    if (yawDelta < 0) {
+      nx = 0.5 - 0.5 * Math.min(1, Math.abs(yawDelta) / leftRange);
+    } else {
+      nx = 0.5 + 0.5 * Math.min(1, Math.abs(yawDelta) / rightRange);
+    }
+
+    let ny;
+    if (pitchDelta < 0) {
+      ny = 0.5 - 0.5 * Math.min(1, Math.abs(pitchDelta) / upRange);
+    } else {
+      ny = 0.5 + 0.5 * Math.min(1, Math.abs(pitchDelta) / downRange);
+    }
+
+    const viewportWidth = Math.max(1, window.innerWidth || 1);
+    const viewportHeight = Math.max(1, window.innerHeight || 1);
+
+    const px = Math.max(0, Math.min(viewportWidth - 1, nx * viewportWidth));
+    const py = Math.max(0, Math.min(viewportHeight - 1, ny * viewportHeight));
+    return [px, py];
+  }
+
+  function distancePoint(a, b) {
+    if (!a || !b) return NaN;
+    return Math.hypot(a[0] - b[0], a[1] - b[1]);
+  }
+
+  function leftEAR(mesh) {
+    const top = pick(mesh, 159);
+    const bottom = pick(mesh, 145);
+    const leftCorner = pick(mesh, 33);
+    const rightCorner = pick(mesh, 133);
+    if (!top || !bottom || !leftCorner || !rightCorner) return NaN;
+    const vertical = distancePoint(top, bottom);
+    const horizontal = Math.max(1, distancePoint(leftCorner, rightCorner));
+    return vertical / horizontal;
+  }
+
+  function rightEAR(mesh) {
+    const top = pick(mesh, 386);
+    const bottom = pick(mesh, 374);
+    const leftCorner = pick(mesh, 362);
+    const rightCorner = pick(mesh, 263);
+    if (!top || !bottom || !leftCorner || !rightCorner) return NaN;
+    const vertical = distancePoint(top, bottom);
+    const horizontal = Math.max(1, distancePoint(leftCorner, rightCorner));
+    return vertical / horizontal;
+  }
+
+  function ensureEarCalibration(mesh) {
+    const left = leftEAR(mesh);
+    const right = rightEAR(mesh);
+    if (!Number.isFinite(left) || !Number.isFinite(right)) {
+      return;
+    }
+    earSampleBuffer.push([left, right]);
+    if (earSampleBuffer.length < 45) {
+      return;
+    }
+    const sum = earSampleBuffer.reduce((acc, cur) => {
+      acc.left += cur[0];
+      acc.right += cur[1];
+      return acc;
+    }, { left: 0, right: 0 });
+    const count = earSampleBuffer.length;
+    const Lopen = sum.left / count;
+    const Ropen = sum.right / count;
+    earCal = {
+      Lopen,
+      Ropen,
+      Lth: Lopen * 0.45,
+      Rth: Ropen * 0.45,
+      ts: Date.now()
+    };
+    chrome.storage.local.set({ earCalV1: earCal }, () => {});
+    earSampleBuffer = [];
+    console.debug('[Blink] EAR calibration saved', earCal);
+  }
+
+  function triggerBlinkClick(button) {
+    window.dispatchEvent(new CustomEvent('blink:click', {
+      detail: { button }
+    }));
+  }
+
+  function updateBlinkState(mesh, ts) {
+    if (!earCal) {
+      ensureEarCalibration(mesh);
+      return;
+    }
+    const left = leftEAR(mesh);
+    const right = rightEAR(mesh);
+    if (!Number.isFinite(left) || !Number.isFinite(right)) {
+      return;
+    }
+    const leftClosed = left < earCal.Lth;
+    const rightClosed = right < earCal.Rth;
+    const bothClosed = leftClosed && rightClosed;
+    if (bothClosed) {
+      if (blinkClosedAt === null) {
+        blinkClosedAt = ts;
+        blinkHoldEmitted = false;
+        window.dispatchEvent(new CustomEvent('blink:start', {
+          detail: { timestamp: ts }
+        }));
+      }
+      const duration = ts - blinkClosedAt;
+      if (!blinkHoldEmitted && duration >= BLINK_LEFT_THRESHOLD_MS) {
+        window.dispatchEvent(new CustomEvent('blink:hold', {
+          detail: { duration }
+        }));
+        blinkHoldEmitted = true;
+      }
+    } else if (blinkClosedAt !== null) {
+      const duration = ts - blinkClosedAt;
+      window.dispatchEvent(new CustomEvent(BLINK_RELEASE_EVENT, {
+        detail: {
+          duration,
+          timestamp: ts
+        }
+      }));
+      blinkClosedAt = null;
+      blinkHoldEmitted = false;
+      if (!window.__gazeHeadCalActive) {
+        if (duration >= BLINK_RIGHT_THRESHOLD_MS) {
+          triggerBlinkClick('right');
+        } else if (duration >= BLINK_LEFT_THRESHOLD_MS) {
+          triggerBlinkClick('left');
+        }
+      }
+    }
   }
 
   function logTargetRanges(samples) {
@@ -369,7 +531,28 @@
 
     if (!face) {
       smoothedPoint = null;
+      headSmoothX = null;
+      headSmoothY = null;
+      window.__lastFace = null;
+      window.__lastHeadAngles = null;
       return;
+    }
+
+    window.__lastFace = face;
+
+    const yawDeg = Number(face.rotation && face.rotation.angle ? face.rotation.angle.yaw : 0);
+    const pitchDeg = Number(face.rotation && face.rotation.angle ? face.rotation.angle.pitch : 0);
+    window.__lastHeadAngles = { yaw: yawDeg, pitch: pitchDeg };
+    window.dispatchEvent(new CustomEvent('head:angles', {
+      detail: { yaw: yawDeg, pitch: pitchDeg, ts }
+    }));
+
+    if (Array.isArray(face.mesh)) {
+      if (!earCal) {
+        ensureEarCalibration(face.mesh);
+      } else {
+        updateBlinkState(face.mesh, ts);
+      }
     }
 
     if (!probePrinted) {
@@ -378,37 +561,49 @@
     }
 
     lastFaceScore = typeof face.score === 'number' ? face.score : 0.8;
+    const now = ts;
+    let confidence = Math.min(1, Math.max(0, lastFaceScore));
+    let point = null;
+    let fromHead = false;
 
     const features = featuresFromFace(face);
     if (!features) {
-      if (!missingFeatureWarned && !window.__gazeNoseFallback) {
-        console.warn('[GazeCore] Unable to derive iris features; toggle Alt+V for preview or Alt+N for nose fallback.');
+      if (!missingFeatureWarned && !window.__gazeHeadMode) {
+        console.warn('[GazeCore] Unable to derive iris features; press Alt+H to calibrate head pointer or keep eyes centered.');
         missingFeatureWarned = true;
       }
     } else {
       missingFeatureWarned = false;
     }
 
-    if (isCalibrating && captureTarget) {
-      if (features) {
-        calibrationSamples.push({ feat: features.slice(), target: captureTarget.slice(), ts });
-        if (calibrationSamples.length > MAX_CALIBRATION_SAMPLES) {
-          calibrationSamples.shift();
-        }
-        dispatchFeatures(features, ts);
-        calibrationFeatureLog.push(features.slice());
+    if (isCalibrating && captureTarget && features) {
+      calibrationSamples.push({ feat: features.slice(), target: captureTarget.slice(), ts });
+      if (calibrationSamples.length > MAX_CALIBRATION_SAMPLES) {
+        calibrationSamples.shift();
       }
+      dispatchFeatures(features, ts);
+      calibrationFeatureLog.push(features.slice());
     }
 
-    let point = null;
-    let confidence = Math.min(1, Math.max(0, lastFaceScore));
-
-    if (window.__gazeNoseFallback) {
-      const nosePoint = nosePointerPx(face);
-      if (nosePoint) {
-        point = nosePoint;
-        confidence = 0.35;
+    if (window.__gazeHeadMode) {
+      if (headCal) {
+        const mapped = mapYawPitchToXY(yawDeg, pitchDeg, headCal);
+        if (mapped) {
+          headSmoothX = headSmoothX == null ? mapped[0] : (headSmoothX * (1 - HEAD_SMOOTH_ALPHA)) + (mapped[0] * HEAD_SMOOTH_ALPHA);
+          headSmoothY = headSmoothY == null ? mapped[1] : (headSmoothY * (1 - HEAD_SMOOTH_ALPHA)) + (mapped[1] * HEAD_SMOOTH_ALPHA);
+          point = [headSmoothX, headSmoothY];
+          confidence = Math.max(confidence, 0.9);
+          fromHead = true;
+          headModeWarned = false;
+        }
+      } else if (!headModeWarned) {
+        dispatchStatus('ready', 'Press Alt+H to calibrate head pointer');
+        headModeWarned = true;
       }
+    } else {
+      headSmoothX = null;
+      headSmoothY = null;
+      headModeWarned = false;
     }
 
     const predictor = typeof window.__gazePredict === 'function'
@@ -422,8 +617,15 @@
       return;
     }
 
+    if (fromHead) {
+      if (now - lastPointTs >= POINT_THROTTLE_MS) {
+        lastPointTs = now;
+        dispatchPoint(point[0], point[1], confidence, now);
+      }
+      return;
+    }
+
     const smoothed = smoothPoint(point[0], point[1]);
-    const now = ts;
     if (now - lastPointTs >= POINT_THROTTLE_MS) {
       lastPointTs = now;
       dispatchPoint(smoothed[0], smoothed[1], confidence, now);
@@ -541,49 +743,6 @@
       (right[1] - mid[1]) / iod,
       yaw / 30,
       pitch / 30
-    ];
-  }
-
-  function nosePointerPx(face) {
-    const mesh = face.mesh;
-    if (!Array.isArray(mesh) || mesh.length < 10) {
-      return null;
-    }
-    const candidates = [1, 4, 5, 6, 45, 275];
-    let point = null;
-    for (let i = 0; i < candidates.length; i += 1) {
-      const candidate = pick(mesh, candidates[i]);
-      if (candidate) {
-        point = candidate;
-        break;
-      }
-    }
-    if (!point) {
-      return null;
-    }
-    const videoWidth = (video && video.videoWidth) || 640;
-    const videoHeight = (video && video.videoHeight) || 480;
-    let x = point[0];
-    let y = point[1];
-    if (Math.abs(x) <= 1 && Math.abs(y) <= 1) {
-      x = (x + 0.5) * videoWidth;
-      y = (y + 0.5) * videoHeight;
-    }
-    if (!Number.isFinite(x) || !Number.isFinite(y)) {
-      return null;
-    }
-    const xNorm = x / videoWidth;
-    const yNorm = y / videoHeight;
-    const viewportWidth = Math.max(1, window.innerWidth || 1);
-    const viewportHeight = Math.max(1, window.innerHeight || 1);
-    const px = (1 - xNorm) * viewportWidth;
-    const py = yNorm * viewportHeight;
-    if (!Number.isFinite(px) || !Number.isFinite(py)) {
-      return null;
-    }
-    return [
-      Math.max(0, Math.min(viewportWidth - 1, px)),
-      Math.max(0, Math.min(viewportHeight - 1, py))
     ];
   }
 
@@ -948,6 +1107,15 @@
     if (changes[CALIBRATION_META_KEY] && (!weights || !weights.length || !Array.isArray(bias))) {
       ensureInitialized().then(() => tryRestoreCalibration()).catch(() => {});
     }
+    if (changes.headCalV1) {
+      headCal = changes.headCalV1.newValue || null;
+      headSmoothX = null;
+      headSmoothY = null;
+      headModeWarned = false;
+    }
+    if (changes.earCalV1 && changes.earCalV1.newValue) {
+      earCal = changes.earCalV1.newValue;
+    }
   }
 
   function handleVisibilityChange() {
@@ -963,6 +1131,14 @@
   chrome.storage.onChanged.addListener(handleStorageChange);
   window.addEventListener('beforeunload', teardown);
 
+  window.addEventListener('head:calibrated', (event) => {
+    if (!event.detail) return;
+    headCal = event.detail;
+    headSmoothX = null;
+    headSmoothY = null;
+    headModeWarned = false;
+  });
+
   (() => {
     const canvas = document.getElementById('gaze-cam');
     if (canvas && canvas.style.display === 'block') {
@@ -970,7 +1146,7 @@
     }
   })();
 
-  storageGet([PARAMS_STORAGE_KEY, CALIBRATION_META_KEY]).then((store) => {
+  storageGet([PARAMS_STORAGE_KEY, CALIBRATION_META_KEY, 'headCalV1', 'earCalV1']).then((store) => {
     const params = store[PARAMS_STORAGE_KEY];
     const meta = store[CALIBRATION_META_KEY];
     if (params && Array.isArray(params.W) && params.W.length && Array.isArray(params.b)) {
@@ -987,6 +1163,13 @@
         window.__gazePredict = (feat) => gazePredictFromWB(feat, window.__gazeW, window.__gazeB, window.__gazeNorm);
         dispatchStatus('live', 'Loaded cached calibration');
       }
+    }
+    if (store.headCalV1) {
+      headCal = store.headCalV1;
+      headModeWarned = false;
+    }
+    if (store.earCalV1) {
+      earCal = store.earCalV1;
     }
   });
 

@@ -9,6 +9,9 @@
   const DEFAULT_DWELL_MS = 600;
   const RECENT_WINDOW_MS = 20000;
   const MAX_RECENT_ENTRIES = 32;
+  const EDGE_PAD_PX = 64;
+  const EDGE_HOLD_MS = 800;
+  const MAX_LINK_SCAN = 500;
 
   let gazeEnabled = false;
   let dwellThreshold = DEFAULT_DWELL_MS;
@@ -21,6 +24,15 @@
   let recentSummaries = new Map();
   let requestSeq = 0;
   let debugLastHref = null;
+  let lastPointerX = 0;
+  let lastPointerY = 0;
+  let lastSnapLink = null;
+  const edgeHold = {
+    top: 0,
+    bottom: 0,
+    left: 0,
+    right: 0
+  };
 
   const processingMessage = '<div style="opacity:0.6;font-style:italic;">Generating summary...</div>';
 
@@ -136,17 +148,6 @@
     tooltip.style.left = `${left}px`;
   }
 
-  function findLink(element) {
-    let node = element;
-    for (let i = 0; i < 6 && node; i += 1) {
-      if (node.tagName === 'A' && node.href) {
-        return node;
-      }
-      node = node.parentElement;
-    }
-    return null;
-  }
-
   function cleanRecentSummaries() {
     if (recentSummaries.size <= MAX_RECENT_ENTRIES) {
       return;
@@ -166,19 +167,165 @@
     cleanRecentSummaries();
   }
 
+  function beep(frequency = 440, duration = 120) {
+    try {
+      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextCtor) return;
+      const ctx = new AudioContextCtor();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = frequency;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      const now = ctx.currentTime;
+      gain.gain.setValueAtTime(0.12, now);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + duration / 1000);
+      osc.start(now);
+      osc.stop(now + duration / 1000 + 0.05);
+      osc.onended = () => ctx.close();
+    } catch (error) {
+      // ignore audio errors
+    }
+  }
+
+  function nearestLink(x, y, maxDistance = 42) {
+    const baseElement = document.elementFromPoint(x, y);
+    const immediate = baseElement ? baseElement.closest('a,[role="link"]') : null;
+    if (immediate) {
+      return immediate;
+    }
+    const anchors = document.querySelectorAll('a,[role="link"]');
+    let best = null;
+    let bestDistance = maxDistance;
+    let count = 0;
+    for (const candidate of anchors) {
+      if (count++ > MAX_LINK_SCAN) break;
+      const rect = candidate.getBoundingClientRect();
+      if (!rect || rect.width === 0 || rect.height === 0) {
+        continue;
+      }
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const dist = Math.hypot(cx - x, cy - y);
+      if (dist < bestDistance) {
+        bestDistance = dist;
+        best = candidate;
+      }
+    }
+    return best;
+  }
+
+  function edgeLoop(x, y) {
+    const now = performance.now();
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const topIntensity = y < EDGE_PAD_PX ? 1 - (y / EDGE_PAD_PX) : 0;
+    const bottomIntensity = y > h - EDGE_PAD_PX ? (y - (h - EDGE_PAD_PX)) / EDGE_PAD_PX : 0;
+    const leftIntensity = x < EDGE_PAD_PX ? 1 - (x / EDGE_PAD_PX) : 0;
+    const rightIntensity = x > w - EDGE_PAD_PX ? (x - (w - EDGE_PAD_PX)) / EDGE_PAD_PX : 0;
+
+    const intents = {
+      top: topIntensity,
+      bottom: bottomIntensity,
+      left: leftIntensity,
+      right: rightIntensity
+    };
+
+    for (const key of Object.keys(intents)) {
+      const intensity = intents[key];
+      if (intensity > 0.9) {
+        if (!edgeHold[key]) {
+          edgeHold[key] = now;
+        } else if (now - edgeHold[key] > EDGE_HOLD_MS) {
+          if (key === 'top') {
+            window.scrollBy({ top: -(200 + 600 * intensity), behavior: 'smooth' });
+            beep(520, 140);
+          } else if (key === 'bottom') {
+            window.scrollBy({ top: 200 + 600 * intensity, behavior: 'smooth' });
+            beep(420, 140);
+          } else if (key === 'left') {
+            try { history.back(); } catch (error) {}
+            beep(360, 180);
+          } else if (key === 'right') {
+            try { history.forward(); } catch (error) {}
+            beep(400, 180);
+          }
+          edgeHold[key] = now;
+        }
+      } else {
+        edgeHold[key] = 0;
+      }
+    }
+  }
+
+  function synthClick(target, button = 0) {
+    if (!target) return;
+    const rect = target.getBoundingClientRect();
+    const clientX = clamp(lastPointerX, rect.left, rect.right);
+    const clientY = clamp(lastPointerY, rect.top, rect.bottom);
+    if (typeof target.focus === 'function') {
+      try {
+        target.focus({ preventScroll: true });
+      } catch (error) {
+        // ignore focus errors
+      }
+    }
+    const downInit = {
+      bubbles: true,
+      cancelable: true,
+      clientX,
+      clientY,
+      button,
+      buttons: button === 2 ? 2 : 1
+    };
+    const upInit = {
+      bubbles: true,
+      cancelable: true,
+      clientX,
+      clientY,
+      button,
+      buttons: 0
+    };
+
+    ['pointerover', 'pointerenter', 'mousemove', 'pointerdown', 'mousedown'].forEach((type) => {
+      target.dispatchEvent(new MouseEvent(type, downInit));
+    });
+    ['mouseup', 'pointerup', 'click'].forEach((type) => {
+      target.dispatchEvent(new MouseEvent(type, upInit));
+    });
+    if (button === 2) {
+      target.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        clientX,
+        clientY,
+        button: 2
+      }));
+    }
+  }
+
   function handlePointEvent(event) {
     if (!gazeEnabled || phase !== 'live') {
       return;
     }
     const detail = event.detail || {};
+    if (!Number.isFinite(detail.x) || !Number.isFinite(detail.y)) {
+      return;
+    }
     const x = clamp(detail.x, 0, window.innerWidth - 1);
     const y = clamp(detail.y, 0, window.innerHeight - 1);
+    lastPointerX = x;
+    lastPointerY = y;
+    edgeLoop(x, y);
+
     const ts = typeof detail.ts === 'number' ? detail.ts : performance.now();
     const delta = Math.max(0, Math.min(500, ts - lastPointTs));
     lastPointTs = ts;
 
-    const targetElement = document.elementFromPoint(x, y);
-    const link = targetElement ? findLink(targetElement) : null;
+    const link = nearestLink(x, y);
+    lastSnapLink = link;
+
     if (DEBUG_DWELL) {
       const href = link && link.href ? link.href : null;
       if (href !== debugLastHref) {
@@ -190,9 +337,6 @@
     if (link !== dwellTarget) {
       dwellTarget = link;
       dwellAccum = 0;
-      if (!link) {
-        return;
-      }
     }
 
     if (!link) {
@@ -536,6 +680,17 @@
       positionTooltip(currentJob.element);
     }
   }
+
+  window.addEventListener('blink:click', (event) => {
+    const button = event && event.detail && event.detail.button === 'right' ? 2 : 0;
+    const target = lastSnapLink || nearestLink(lastPointerX, lastPointerY) || document.elementFromPoint(lastPointerX, lastPointerY);
+    if (!target) {
+      beep(280, 140);
+      return;
+    }
+    synthClick(target, button);
+    beep(button === 2 ? 320 : 560, 150);
+  });
 
   function init() {
     ensureTooltipStyles();
