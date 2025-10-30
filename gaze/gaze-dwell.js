@@ -12,6 +12,8 @@
   const EDGE_PAD_PX = 64;
   const EDGE_HOLD_MS = 800;
   const MAX_LINK_SCAN = 500;
+  const DEADZONE_PX = 6;
+  const STICKY_RADIUS_PX = 28;
 
   let gazeEnabled = false;
   let dwellThreshold = DEFAULT_DWELL_MS;
@@ -26,6 +28,9 @@
   let debugLastHref = null;
   let lastPointerX = 0;
   let lastPointerY = 0;
+  let effectiveX = null;
+  let effectiveY = null;
+  let snappedLink = null;
   let lastSnapLink = null;
   const edgeHold = {
     top: 0,
@@ -100,6 +105,7 @@
 
   function showTooltipForLink(link, html) {
     if (!link) {
+      snappedLink = null;
       return;
     }
     const tip = ensureTooltip();
@@ -216,6 +222,47 @@
     return best;
   }
 
+  function applyDeadzone(x, y) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      return { x, y };
+    }
+    if (effectiveX === null || effectiveY === null) {
+      effectiveX = x;
+      effectiveY = y;
+      return { x, y };
+    }
+    const dist = Math.hypot(x - effectiveX, y - effectiveY);
+    if (dist < DEADZONE_PX) {
+      return { x: effectiveX, y: effectiveY };
+    }
+    effectiveX = x;
+    effectiveY = y;
+    return { x, y };
+  }
+
+  function snapLink(x, y) {
+    if (snappedLink && (!document.contains(snappedLink))) {
+      snappedLink = null;
+    }
+    if (snappedLink) {
+      const rect = snappedLink.getBoundingClientRect();
+      if (rect && rect.width && rect.height) {
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        if (Math.hypot(cx - x, cy - y) < STICKY_RADIUS_PX) {
+          return snappedLink;
+        }
+      }
+      snappedLink = null;
+    }
+    const next = nearestLink(x, y, 42);
+    if (next) {
+      snappedLink = next;
+      lastSnapLink = next;
+    }
+    return snappedLink;
+  }
+
   function edgeLoop(x, y) {
     const now = performance.now();
     const w = window.innerWidth;
@@ -239,17 +286,11 @@
           edgeHold[key] = now;
         } else if (now - edgeHold[key] > EDGE_HOLD_MS) {
           if (key === 'top') {
-            window.scrollBy({ top: -(200 + 600 * intensity), behavior: 'smooth' });
-            beep(520, 140);
+            window.scrollBy({ top: -(120 + 360 * intensity), behavior: 'smooth' });
+            beep(520, 120);
           } else if (key === 'bottom') {
-            window.scrollBy({ top: 200 + 600 * intensity, behavior: 'smooth' });
-            beep(420, 140);
-          } else if (key === 'left') {
-            try { history.back(); } catch (error) {}
-            beep(360, 180);
-          } else if (key === 'right') {
-            try { history.forward(); } catch (error) {}
-            beep(400, 180);
+            window.scrollBy({ top: 120 + 360 * intensity, behavior: 'smooth' });
+            beep(420, 120);
           }
           edgeHold[key] = now;
         }
@@ -313,18 +354,24 @@
     if (!Number.isFinite(detail.x) || !Number.isFinite(detail.y)) {
       return;
     }
-    const x = clamp(detail.x, 0, window.innerWidth - 1);
-    const y = clamp(detail.y, 0, window.innerHeight - 1);
-    lastPointerX = x;
-    lastPointerY = y;
-    edgeLoop(x, y);
+    const rawX = clamp(detail.x, 0, window.innerWidth - 1);
+    const rawY = clamp(detail.y, 0, window.innerHeight - 1);
+    lastPointerX = rawX;
+    lastPointerY = rawY;
+    edgeLoop(rawX, rawY);
+
+    const { x, y } = applyDeadzone(rawX, rawY);
 
     const ts = typeof detail.ts === 'number' ? detail.ts : performance.now();
     const delta = Math.max(0, Math.min(500, ts - lastPointTs));
     lastPointTs = ts;
 
-    const link = nearestLink(x, y);
-    lastSnapLink = link;
+    const link = snapLink(x, y);
+    if (link) {
+      lastSnapLink = link;
+    } else {
+      lastSnapLink = null;
+    }
 
     if (DEBUG_DWELL) {
       const href = link && link.href ? link.href : null;
