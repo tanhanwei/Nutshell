@@ -31,7 +31,7 @@
   let smoothedPoint = null;
   let lastPointTs = 0;
   let lastFaceScore = 0;
-  let previewOn = false;
+  let previewOn = true;
   let probePrinted = false;
   let missingFeatureWarned = false;
 
@@ -49,25 +49,145 @@
     window.__gazeNoseFallback = false;
   }
   if (typeof window.__gazePredict !== 'function') {
-    window.__gazePredict = (feat) => gazePredictFromWB(feat, window.__gazeW, window.__gazeB);
+    window.__gazePredict = (feat) => gazePredictFromWB(feat, window.__gazeW, window.__gazeB, window.__gazeNorm);
   }
 
   window.addEventListener('gaze:preview-toggle', (event) => {
     previewOn = Boolean(event && event.detail && event.detail.on);
   });
 
-  function gazePredictFromWB(features, weightArray, biasArray) {
+  const calibrationFeatureLog = [];
+  if (!window.__gazeNorm) {
+    window.__gazeNorm = null;
+  }
+
+  function augmentFeatures(baseFeat) {
+    const [lx, ly, rx, ry, yaw, pitch] = baseFeat;
+    const ex = rx - lx;
+    const ey = ry - ly;
+    return [
+      lx, ly, rx, ry, yaw, pitch,
+      ex, ey,
+      ex * ex,
+      ey * ey,
+      ex * ey,
+      lx * lx,
+      ly * ly,
+      rx * rx,
+      ry * ry
+    ];
+  }
+
+  function standardizeMatrix(matrix) {
+    const rowCount = matrix.length;
+    const colCount = matrix[0].length;
+    const mean = new Array(colCount).fill(0);
+    const std = new Array(colCount).fill(0);
+    matrix.forEach((row) => {
+      for (let d = 0; d < colCount; d += 1) {
+        mean[d] += row[d];
+      }
+    });
+    for (let d = 0; d < colCount; d += 1) {
+      mean[d] /= rowCount;
+    }
+    matrix.forEach((row) => {
+      for (let d = 0; d < colCount; d += 1) {
+        const delta = row[d] - mean[d];
+        std[d] += delta * delta;
+      }
+    });
+    for (let d = 0; d < colCount; d += 1) {
+      std[d] = Math.sqrt(std[d] / rowCount) || 1;
+    }
+    const normalized = matrix.map((row) => row.map((value, d) => (value - mean[d]) / std[d]));
+    return { normalized, mean, std };
+  }
+
+  function logTargetRanges(samples) {
+    if (!samples || !samples.length) {
+      console.debug('[GazeCore] No calibration targets to log');
+      return;
+    }
+    let minx = Infinity;
+    let maxx = -Infinity;
+    let miny = Infinity;
+    let maxy = -Infinity;
+    samples.forEach((sample) => {
+      const [tx, ty] = sample.target;
+      if (typeof tx === 'number') {
+        minx = Math.min(minx, tx);
+        maxx = Math.max(maxx, tx);
+      }
+      if (typeof ty === 'number') {
+        miny = Math.min(miny, ty);
+        maxy = Math.max(maxy, ty);
+      }
+    });
+    console.debug('[GazeCore] target ranges px:', {
+      minx,
+      maxx,
+      miny,
+      maxy,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight
+    });
+  }
+
+  function logFeatureVariance() {
+    if (!calibrationFeatureLog.length) {
+      console.debug('[GazeCore] No feature samples collected during calibration');
+      return;
+    }
+    const D = calibrationFeatureLog[0].length;
+    const N = calibrationFeatureLog.length;
+    const mean = new Array(D).fill(0);
+    const variance = new Array(D).fill(0);
+    calibrationFeatureLog.forEach((row) => {
+      for (let d = 0; d < D; d += 1) {
+        mean[d] += row[d];
+      }
+    });
+    for (let d = 0; d < D; d += 1) {
+      mean[d] /= N;
+    }
+    calibrationFeatureLog.forEach((row) => {
+      for (let d = 0; d < D; d += 1) {
+        const delta = row[d] - mean[d];
+        variance[d] += delta * delta;
+      }
+    });
+    for (let d = 0; d < D; d += 1) {
+      variance[d] /= N;
+    }
+    const labels = ['Lx', 'Ly', 'Rx', 'Ry', 'yaw', 'pitch'];
+    const table = variance.map((v, idx) => ({
+      dim: labels[idx] || `f${idx}`,
+      variance: v
+    }));
+    console.table(table);
+    calibrationFeatureLog.length = 0;
+  }
+
+  function gazePredictFromWB(features, weightArray, biasArray, norm) {
     if (!Array.isArray(weightArray) || !Array.isArray(biasArray)) {
       return null;
     }
+    const augmented = augmentFeatures(features);
     let xn = Number(biasArray[0]) || 0;
     let yn = Number(biasArray[1]) || 0;
-    const count = Math.min(weightArray.length, features.length);
+    const count = Math.min(weightArray.length, augmented.length);
+    if (norm && Array.isArray(norm.mu) && Array.isArray(norm.sd)) {
+      for (let d = 0; d < count; d += 1) {
+        const sd = norm.sd[d] || 1;
+        augmented[d] = (augmented[d] - (norm.mu[d] || 0)) / sd;
+      }
+    }
     for (let i = 0; i < count; i += 1) {
       const row = weightArray[i];
       if (!row) continue;
-      xn += (row[0] || 0) * features[i];
-      yn += (row[1] || 0) * features[i];
+      xn += (row[0] || 0) * augmented[i];
+      yn += (row[1] || 0) * augmented[i];
     }
     const viewportWidth = Math.max(1, window.innerWidth || 1);
     const viewportHeight = Math.max(1, window.innerHeight || 1);
@@ -276,6 +396,7 @@
           calibrationSamples.shift();
         }
         dispatchFeatures(features, ts);
+        calibrationFeatureLog.push(features.slice());
       }
     }
 
@@ -290,7 +411,9 @@
       }
     }
 
-    const predictor = typeof window.__gazePredict === 'function' ? window.__gazePredict : null;
+    const predictor = typeof window.__gazePredict === 'function'
+      ? window.__gazePredict
+      : (feat) => gazePredictFromWB(feat, weights || window.__gazeW, bias || window.__gazeB, window.__gazeNorm);
     if (!point && features && predictor && canEmitPoints) {
       point = predictor(features);
     }
@@ -339,12 +462,22 @@
     const annotations = face.annotations || {};
     let left = Array.isArray(annotations.leftEyeIris) ? centroid(annotations.leftEyeIris) : null;
     let right = Array.isArray(annotations.rightEyeIris) ? centroid(annotations.rightEyeIris) : null;
+    let source = '';
+
+    if (left) source += 'annL ';
+    if (right) source += 'annR ';
 
     if ((!left || !right) && Array.isArray(face.iris)) {
       const leftIris = Array.isArray(face.iris.left) ? face.iris.left : face.iris[0];
       const rightIris = Array.isArray(face.iris.right) ? face.iris.right : face.iris[1];
-      if (!left && Array.isArray(leftIris)) left = centroid(leftIris);
-      if (!right && Array.isArray(rightIris)) right = centroid(rightIris);
+      if (!left && Array.isArray(leftIris)) {
+        left = centroid(leftIris);
+        if (left) source += 'irisL ';
+      }
+      if (!right && Array.isArray(rightIris)) {
+        right = centroid(rightIris);
+        if (right) source += 'irisR ';
+      }
     }
 
     if ((!left || !right) && Array.isArray(face.mesh) && face.mesh.length >= 478) {
@@ -353,11 +486,17 @@
       const rightIndices = [473, 474, 475, 476, 477];
       if (!left) {
         const lp = leftIndices.map((idx) => pick(mesh, idx));
-        if (lp.every(Boolean)) left = centroid(lp);
+        if (lp.every(Boolean)) {
+          left = centroid(lp);
+          if (left) source += 'meshL ';
+        }
       }
       if (!right) {
         const rp = rightIndices.map((idx) => pick(mesh, idx));
-        if (rp.every(Boolean)) right = centroid(rp);
+        if (rp.every(Boolean)) {
+          right = centroid(rp);
+          if (right) source += 'meshR ';
+        }
       }
     }
 
@@ -365,8 +504,21 @@
       const mesh = face.mesh;
       const leftCorners = [33, 133].map((idx) => pick(mesh, idx));
       const rightCorners = [362, 263].map((idx) => pick(mesh, idx));
-      if (!left && leftCorners.every(Boolean)) left = centroid(leftCorners);
-      if (!right && rightCorners.every(Boolean)) right = centroid(rightCorners);
+      if (!left && leftCorners.every(Boolean)) {
+        left = centroid(leftCorners);
+        if (left) source += 'cornerL ';
+      }
+      if (!right && rightCorners.every(Boolean)) {
+        right = centroid(rightCorners);
+        if (right) source += 'cornerR ';
+      }
+    }
+
+    if ((!left || !right) && !missingFeatureWarned) {
+      console.warn('[GazeCore] Iris centers missing; sources attempted:', source.trim());
+    }
+    if (left && right && left[0] === right[0] && left[1] === right[1] && !missingFeatureWarned) {
+      console.warn('[GazeCore] Iris centers identical; source:', source.trim());
     }
 
     return { left, right };
@@ -518,7 +670,7 @@
   function predictPoint(features) {
     const predictor = typeof window.__gazePredict === 'function'
       ? window.__gazePredict
-      : (feat) => gazePredictFromWB(feat, weights || window.__gazeW, bias || window.__gazeB);
+      : (feat) => gazePredictFromWB(feat, weights || window.__gazeW, bias || window.__gazeB, window.__gazeNorm);
     return predictor ? predictor(features) : null;
   }
 
@@ -546,7 +698,11 @@
     bias = storedBias;
     window.__gazeW = storedWeights;
     window.__gazeB = storedBias;
-    window.__gazePredict = (feat) => gazePredictFromWB(feat, window.__gazeW, window.__gazeB);
+    window.__gazeNorm = {
+      mu: Array.isArray(params.mu) ? params.mu : null,
+      sd: Array.isArray(params.sd) ? params.sd : null
+    };
+    window.__gazePredict = (feat) => gazePredictFromWB(feat, window.__gazeW, window.__gazeB, window.__gazeNorm);
     canEmitPoints = true;
     dispatchStatus('live', 'Loaded saved calibration');
   }
@@ -565,22 +721,25 @@
       return false;
     }
     console.debug('[GazeCore] Training with samples:', samples.length);
+    logTargetRanges(samples);
     const tf = human.tf;
-    const featureLength = samples[0].feat.length;
     const sampleCount = samples.length;
     const viewportWidth = Math.max(1, window.innerWidth || 1);
     const viewportHeight = Math.max(1, window.innerHeight || 1);
 
-    const featureMatrix = samples.map((s) => s.feat);
+    const baseFeatures = samples.map((s) => augmentFeatures(s.feat));
+    const { normalized: standardizedFeatures, mean: featureMean, std: featureStd } = standardizeMatrix(baseFeatures);
     const normalizedTargets = samples.map((s) => [
       s.target[0] / viewportWidth,
       s.target[1] / viewportHeight
     ]);
 
-    const X = tf.tensor2d(featureMatrix, [sampleCount, featureLength], 'float32');
+    const featureCols = standardizedFeatures[0].length;
+
+    const X = tf.tensor2d(standardizedFeatures, [sampleCount, featureCols], 'float32');
     const Y = tf.tensor2d(normalizedTargets, [sampleCount, 2], 'float32');
 
-    let W = tf.variable(tf.zeros([featureLength, 2], 'float32'));
+    let W = tf.variable(tf.zeros([featureCols, 2], 'float32'));
     let B = tf.variable(tf.zeros([1, 2], 'float32'));
 
     const learningRate = 0.05;
@@ -623,7 +782,8 @@
       bias = biasArray;
       window.__gazeW = weightArray;
       window.__gazeB = biasArray;
-      window.__gazePredict = (feat) => gazePredictFromWB(feat, window.__gazeW, window.__gazeB);
+      window.__gazeNorm = { mu: featureMean, sd: featureStd };
+      window.__gazePredict = (feat) => gazePredictFromWB(feat, window.__gazeW, window.__gazeB, window.__gazeNorm);
       canEmitPoints = true;
       gazeEnabled = true;
 
@@ -637,9 +797,11 @@
         [PARAMS_STORAGE_KEY]: {
           W: weightArray,
           b: biasArray,
+          mu: featureMean,
+          sd: featureStd,
           screen: screenInfo,
           ts: Date.now(),
-          v: 2
+          v: 3
         },
         [CALIBRATION_META_KEY]: {
           screen: screenInfo,
@@ -672,12 +834,15 @@
         console.warn('[GazeCore] Calibration produced no error samples');
         dispatchStatus('live', 'Calibration complete');
       }
+      logFeatureVariance();
       return true;
     } catch (error) {
       console.error('[GazeCore] Calibration solve failed:', error);
       weights = null;
       bias = null;
       canEmitPoints = false;
+      calibrationFeatureLog.length = 0;
+      window.__gazeNorm = null;
       return false;
     } finally {
       X.dispose();
@@ -709,6 +874,7 @@
     isCalibrating = true;
     canEmitPoints = false;
     window.__gazeCalibrating = true;
+    calibrationFeatureLog.length = 0;
     dispatchStatus('calibrating', 'Look at each dot until it disappears');
     ensureInitialized().catch((error) => {
       console.warn('[GazeCore] Initialization failed during calibration:', error);
@@ -770,7 +936,11 @@
         bias = nextParams.b;
         window.__gazeW = nextParams.W;
         window.__gazeB = nextParams.b;
-        window.__gazePredict = (feat) => gazePredictFromWB(feat, window.__gazeW, window.__gazeB);
+        window.__gazeNorm = {
+          mu: Array.isArray(nextParams.mu) ? nextParams.mu : null,
+          sd: Array.isArray(nextParams.sd) ? nextParams.sd : null
+        };
+        window.__gazePredict = (feat) => gazePredictFromWB(feat, window.__gazeW, window.__gazeB, window.__gazeNorm);
         canEmitPoints = true;
         dispatchStatus('live', 'Calibration loaded');
       }
@@ -810,7 +980,11 @@
         bias = params.b;
         window.__gazeW = params.W;
         window.__gazeB = params.b;
-        window.__gazePredict = (feat) => gazePredictFromWB(feat, window.__gazeW, window.__gazeB);
+        window.__gazeNorm = {
+          mu: Array.isArray(params.mu) ? params.mu : null,
+          sd: Array.isArray(params.sd) ? params.sd : null
+        };
+        window.__gazePredict = (feat) => gazePredictFromWB(feat, window.__gazeW, window.__gazeB, window.__gazeNorm);
         dispatchStatus('live', 'Loaded cached calibration');
       }
     }

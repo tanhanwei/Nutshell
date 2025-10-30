@@ -29,6 +29,7 @@ If the bundle/models are missing you will see a status warning (“Install gaze/
 - Toggle the floating debug HUD (status/fps/confidence) with **Alt+H** and the red gaze cursor with **Alt+P**.
 - Toggle the mirrored camera preview with iris overlays using **Alt+V**; enable the nose-tip fallback pointer for quick motion checks with **Alt+N**.
 - During calibration the HUD shows the running sample count; once a solve completes it reports the median and 90th percentile fit error in pixels.
+- The console logs a variance table for the captured feature vectors and warns if iris data falls back to mesh corners; expect non-zero variance for the eye terms.
 - Press **Esc** while a summary is running to cancel (aborts active YouTube capture when possible).
 
 ## Storage Keys
@@ -47,5 +48,6 @@ If the bundle/models are missing you will see a status warning (“Install gaze/
 5. Hit **Esc** mid-run to ensure cancellation hides the tooltip and aborts active YouTube jobs.
 6. Watch the page console for `[GazeDwell] target:` logs (set `DEBUG_DWELL` in `gaze/gaze-dwell.js` to silence).
 7. Enable the preview (**Alt+V**) to verify Human’s face/iris landmarks and confirm the HUD shows calibration sample counts and fit errors.
+8. Check the console for the feature variance table and calibration fit metrics; if iris data is missing, toggle the nose fallback (**Alt+N**) to keep dwell summaries functional while you recalibrate.
 
 Run the steps in `TESTING_GUIDE.md` if you update dwell or calibration logic, and record findings in a `TEST_RESULTS_*.md` file per repo guidelines.

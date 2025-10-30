@@ -35,7 +35,7 @@
   let lastConfidence = null;
   let hasPointerPosition = false;
   let previewCanvas = null;
-  let previewVisible = false;
+  let previewVisible = true;
   let sampleCount = 0;
 
   if (typeof window.__gazeNoseFallback !== 'boolean') {
@@ -98,6 +98,7 @@
       previewCanvas.height = 240;
       previewCanvas.style.display = previewVisible ? 'block' : 'none';
       document.documentElement.appendChild(previewCanvas);
+      console.debug('[GazeOverlay] Preview canvas mounted');
     }
     return previewCanvas;
   }
@@ -110,6 +111,9 @@
       detail: { on: previewVisible }
     }));
     refreshDebugHud();
+    window.dispatchEvent(new CustomEvent('gaze:preview-toggle', {
+      detail: { on: previewVisible }
+    }));
   }
 
   function ensureDebugElements() {
@@ -337,6 +341,7 @@
       if (code === 'KeyV') {
         event.preventDefault();
         setPreviewVisible(!previewVisible);
+        console.debug('[GazeOverlay] Preview', previewVisible ? 'ON' : 'OFF');
         return;
       }
       if (code === 'KeyN') {
@@ -351,6 +356,7 @@
             note: window.__gazeNoseFallback ? 'nose-pointer' : 'iris'
           }
         }));
+        console.debug('[GazeOverlay] Nose fallback', window.__gazeNoseFallback ? 'ENABLED' : 'DISABLED');
         return;
       }
     }
