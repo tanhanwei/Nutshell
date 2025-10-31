@@ -46,8 +46,13 @@
   const processingMessage = '<div style="opacity:0.6;font-style:italic;">Generating summary...</div>';
 
   function ensureScrollZones() {
-    if (scrollZones) {
+    // Check if zones exist AND are in the DOM
+    if (scrollZones && scrollZones.parentNode) {
       return scrollZones;
+    }
+    // If body doesn't exist yet, can't create zones
+    if (!document.body) {
+      return null;
     }
     scrollZones = document.createElement('div');
     scrollZones.id = SCROLL_ZONE_ID;
@@ -373,6 +378,9 @@
   }
 
   function edgeLoop(x, y) {
+    // Ensure scroll zones are created (in case body wasn't ready during init)
+    ensureScrollZones();
+
     const now = performance.now();
     const w = window.innerWidth;
     const h = window.innerHeight;
