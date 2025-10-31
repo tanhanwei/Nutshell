@@ -1077,6 +1077,10 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
       gazeEnabled = Boolean(changes[GAZE_ENABLED_KEY].newValue);
       if (gazeEnabled) {
         ensureInitialized().catch(() => {});
+      } else {
+        // Disable head tracking
+        teardown();
+        dispatchStatus('ready', 'Head tracking disabled');
       }
     }
     if (changes[HEAD_CAL_STORAGE_KEY]) {

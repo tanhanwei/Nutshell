@@ -274,6 +274,12 @@ function updateGazeStatus(phase, note) {
   // Remove all status classes
   elements.gazeStatusDot.className = 'status-dot';
 
+  // Check if disabled based on note
+  if (note && note.toLowerCase().includes('disabled')) {
+    elements.gazeStatusText.textContent = 'Disabled';
+    return;
+  }
+
   // Map phase to status
   const statusMap = {
     'loading': { class: 'loading', text: 'Loading models...' },

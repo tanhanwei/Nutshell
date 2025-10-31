@@ -31,6 +31,23 @@
   document.addEventListener('keydown', handleKeyDown, true);
   window.addEventListener('gaze:status', handleStatus);
   window.addEventListener('gaze:point', handlePoint);
+  chrome.storage.onChanged.addListener(handleStorageChange);
+
+  function handleStorageChange(changes, areaName) {
+    if (areaName !== 'local') return;
+    if (changes.gazeEnabled) {
+      const enabled = Boolean(changes.gazeEnabled.newValue);
+      if (!enabled) {
+        // Hide UI when disabled
+        setPointerVisible(false);
+        setPreviewVisible(false);
+      } else {
+        // Show UI when re-enabled
+        setPreviewVisible(true);
+        setPointerVisible(true);
+      }
+    }
+  }
 
   function injectStyles() {
     if (document.getElementById(STYLE_ID)) {
