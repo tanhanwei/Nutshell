@@ -52,29 +52,35 @@
       display: none;
       align-items: center;
       justify-content: center;
-      pointer-events: none;
+      background: rgba(0, 0, 0, 0.85);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      pointer-events: auto;
     `;
 
     const panel = document.createElement('div');
     panel.style.cssText = `
-      min-width: 280px;
-      max-width: 360px;
-      padding: 20px 24px;
-      border-radius: 16px;
-      background: rgba(8, 12, 28, 0.92);
-      color: #f2f6ff;
+      min-width: 320px;
+      max-width: 420px;
+      padding: 32px 32px;
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.95);
+      color: #1a1a1a;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       text-align: center;
-      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.4);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
       pointer-events: auto;
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.3);
     `;
 
     titleEl = document.createElement('div');
-    titleEl.style.cssText = 'font-size: 18px; font-weight: 600; margin-bottom: 12px;';
+    titleEl.style.cssText = 'font-size: 22px; font-weight: 700; margin-bottom: 16px; color: #1a1a1a; letter-spacing: -0.02em;';
     hintEl = document.createElement('div');
-    hintEl.style.cssText = 'font-size: 14px; opacity: 0.85; margin-bottom: 16px;';
+    hintEl.style.cssText = 'font-size: 16px; opacity: 0.75; margin-bottom: 20px; color: #333; line-height: 1.5;';
     footerEl = document.createElement('div');
-    footerEl.style.cssText = 'font-size: 12px; opacity: 0.6;';
+    footerEl.style.cssText = 'font-size: 13px; opacity: 0.5; color: #666;';
 
     panel.appendChild(titleEl);
     panel.appendChild(hintEl);

@@ -1164,14 +1164,14 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
     if (typeof store[GAZE_ENABLED_KEY] === 'boolean') {
       gazeEnabled = store[GAZE_ENABLED_KEY];
     } else {
-      gazeEnabled = true;
-      storageSet({ [GAZE_ENABLED_KEY]: true });
+      gazeEnabled = false;
+      storageSet({ [GAZE_ENABLED_KEY]: false });
     }
 
     if (gazeEnabled) {
       ensureInitialized().catch(() => {});
     } else {
-      dispatchStatus('ready', 'Enable gaze tracking to start head pointer');
+      dispatchStatus('ready', 'Enable gaze tracking to start');
     }
   });
 })();

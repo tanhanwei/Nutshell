@@ -7,7 +7,7 @@ let settings = {
   apiChoice: 'summarization',
   customPrompt: 'Summarize this article in 2-3 sentences',
   displayMode: 'both',
-  gazeEnabled: true,
+  gazeEnabled: false,
   gazeDwellMs: 600
 };
 
@@ -123,6 +123,16 @@ async function loadSettings() {
     elements.dwellValue.textContent = settings.gazeDwellMs;
   }
 
+  // Update calibrate button disabled state
+  if (elements.calibrateBtn) {
+    elements.calibrateBtn.disabled = !settings.gazeEnabled;
+  }
+
+  // Update initial status based on gazeEnabled
+  if (!settings.gazeEnabled) {
+    updateGazeStatus('ready', 'Enable to start');
+  }
+
   togglePromptContainer();
 }
 
@@ -194,6 +204,17 @@ function setupEventListeners() {
     elements.gazeEnabled.addEventListener('change', (e) => {
       settings.gazeEnabled = e.target.checked;
       saveSettings();
+
+      // Update calibrate button disabled state
+      if (elements.calibrateBtn) {
+        elements.calibrateBtn.disabled = !settings.gazeEnabled;
+      }
+
+      // Update status text
+      if (!settings.gazeEnabled) {
+        updateGazeStatus('ready', 'Enable to start');
+      }
+
       console.log('[Sidepanel] Gaze tracking toggled:', settings.gazeEnabled);
     });
   }
@@ -202,6 +223,10 @@ function setupEventListeners() {
   if (elements.calibrateBtn) {
     elements.calibrateBtn.addEventListener('click', () => {
       console.log('[Sidepanel] Calibrate button clicked');
+
+      // Blur the button to prevent SPACE from re-clicking it
+      elements.calibrateBtn.blur();
+
       // Send message to active tab to trigger calibration
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
         if (tabs[0]) {
