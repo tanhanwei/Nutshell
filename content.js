@@ -41,6 +41,7 @@
   let currentlyDisplayedUrl = null; // Track what URL the tooltip is currently showing
   let processingElement = null; // Track element being processed for positioning
   let tooltip = null;
+  let tooltipContent = null; // Content wrapper inside tooltip
   let tooltipCloseHandlerAttached = false;
   let twitterHoverTimeout = null;
   let currentTwitterArticle = null;
@@ -113,10 +114,6 @@
           color: #333;
           transform: scale(1.1);
         }
-        #hover-summary-tooltip {
-          position: relative;
-          padding-right: 40px !important; /* Make room for close button */
-        }
       `;
       document.head.appendChild(style);
     }
@@ -129,7 +126,7 @@
       background: white;
       border-radius: 12px;
       box-shadow: 0 10px 40px rgba(0,0,0,0.2), 0 2px 8px rgba(0,0,0,0.1);
-      padding: 16px;
+      padding: 16px 40px 16px 16px;
       max-width: 400px;
       max-height: 500px;
       overflow-y: auto;
@@ -144,19 +141,11 @@
       cursor: auto;
       user-select: text;
     `;
-    
-    // Make tooltip interactive - prevent hiding when mouse enters
-    tooltip.addEventListener('mouseenter', () => {
-      isMouseInTooltip = true;
-      clearTimeout(hideTimeout);
-      hideTimeout = null;
-    });
-    
-    // Hide with delay when mouse leaves tooltip
-    tooltip.addEventListener('mouseleave', () => {
-      isMouseInTooltip = false;
-      scheduleHide(200); // Short delay when leaving tooltip
-    });
+
+    // Create content wrapper (so innerHTML changes don't remove close button)
+    tooltipContent = document.createElement('div');
+    tooltipContent.className = 'tooltip-content-wrapper';
+    tooltip.appendChild(tooltipContent);
 
     // Add close button
     const closeBtn = document.createElement('button');
@@ -169,6 +158,19 @@
       hideTooltip();
     });
     tooltip.appendChild(closeBtn);
+
+    // Make tooltip interactive - prevent hiding when mouse enters
+    tooltip.addEventListener('mouseenter', () => {
+      isMouseInTooltip = true;
+      clearTimeout(hideTimeout);
+      hideTimeout = null;
+    });
+
+    // Hide with delay when mouse leaves tooltip
+    tooltip.addEventListener('mouseleave', () => {
+      isMouseInTooltip = false;
+      scheduleHide(200); // Short delay when leaving tooltip
+    });
 
     document.body.appendChild(tooltip);
     return tooltip;
@@ -1002,7 +1004,7 @@
     hideTimeout = null;
     
     const tooltipEl = createTooltip();
-    tooltipEl.innerHTML = content;
+    tooltipContent.innerHTML = content;
     tooltipEl.style.display = 'block';
     attachTooltipDismissHandlers();
     
@@ -1068,8 +1070,8 @@
       
       // Track what URL is currently displayed
       currentlyDisplayedUrl = url;
-      
-      tooltip.innerHTML = content;
+
+      tooltipContent.innerHTML = content;
       tooltip.style.opacity = '1';
       
       const elementForPositioning = currentHoveredElement || processingElement;
