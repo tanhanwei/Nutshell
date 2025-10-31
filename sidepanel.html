@@ -9,7 +9,56 @@
 </head>
 <body>
   <div id="container">
-    <!-- Settings Section (Always visible at top) -->
+    <!-- Header with Branding -->
+    <div id="nutshell-header">
+      <img src="icons/icon-48.png" alt="Nutshell" class="nutshell-logo">
+      <h2 class="nutshell-title">Nutshell</h2>
+    </div>
+
+    <!-- Head Tracking Section (Main Feature First!) -->
+    <div id="gaze-section">
+      <h3>🎯 Head Tracking (Hands-Free)</h3>
+
+      <div class="setting-group">
+        <label class="toggle-container">
+          <input type="checkbox" id="gaze-enabled" checked>
+          <span class="toggle-slider"></span>
+          <span class="toggle-label">Enable Head Tracking</span>
+        </label>
+        <p class="help-text">Requires camera access for head movement detection</p>
+      </div>
+
+      <div class="status-indicator">
+        <span class="status-dot" id="gaze-status-dot"></span>
+        <span id="gaze-status-text">Disabled</span>
+      </div>
+
+      <button id="calibrate-btn" class="btn secondary">
+        Calibrate Head Position
+      </button>
+
+      <div class="setting-group">
+        <label class="setting-label" for="dwell-time">
+          Dwell Time: <span id="dwell-value">600</span>ms
+        </label>
+        <input type="range" id="dwell-time" min="300" max="1200" step="50" value="600" class="slider">
+        <p class="help-text">Time to hover before clicking a link</p>
+      </div>
+
+      <details class="keyboard-shortcuts">
+        <summary>Keyboard Shortcuts</summary>
+        <ul>
+          <li><kbd>Alt+H</kbd> - Calibrate head tracking</li>
+          <li><kbd>Alt+P</kbd> - Toggle pointer visibility</li>
+          <li><kbd>Alt+V</kbd> - Toggle camera preview</li>
+          <li><kbd>Shift+H</kbd> - Toggle debug HUD</li>
+        </ul>
+      </details>
+    </div>
+
+    <hr>
+
+    <!-- Settings Section -->
     <div id="settings-section">
       <h3>AI Summarization</h3>
       
@@ -37,47 +86,6 @@
         <label for="custom-prompt">Custom Prompt:</label>
         <textarea id="custom-prompt" rows="3" placeholder="Enter your summarization prompt...">Summarize this article in 2-3 sentences</textarea>
       </div>
-    </div>
-
-    <!-- Head Tracking Section -->
-    <div id="gaze-section">
-      <h3>🎯 Head Tracking (Hands-Free)</h3>
-
-      <div class="setting-group">
-        <label class="toggle-container">
-          <input type="checkbox" id="gaze-enabled" checked>
-          <span class="toggle-slider"></span>
-          <span class="toggle-label">Enable Head Tracking</span>
-        </label>
-      </div>
-
-      <div class="status-indicator">
-        <span class="status-dot" id="gaze-status-dot"></span>
-        <span id="gaze-status-text">Disabled</span>
-      </div>
-
-      <button id="calibrate-btn" class="btn secondary">
-        Calibrate Head Position
-      </button>
-      <p class="help-text">Press Alt+H or click to calibrate</p>
-
-      <div class="setting-group">
-        <label class="setting-label" for="dwell-time">
-          Dwell Time: <span id="dwell-value">600</span>ms
-        </label>
-        <input type="range" id="dwell-time" min="300" max="1200" step="50" value="600" class="slider">
-        <p class="help-text">Time to hover before clicking a link</p>
-      </div>
-
-      <details class="keyboard-shortcuts">
-        <summary>Keyboard Shortcuts</summary>
-        <ul>
-          <li><kbd>Alt+H</kbd> - Calibrate head tracking</li>
-          <li><kbd>Alt+P</kbd> - Toggle pointer visibility</li>
-          <li><kbd>Alt+V</kbd> - Toggle camera preview</li>
-          <li><kbd>Shift+H</kbd> - Toggle debug HUD</li>
-        </ul>
-      </details>
     </div>
 
     <hr>
@@ -138,7 +146,7 @@
     
     <!-- Welcome State -->
     <div id="welcome">
-      <p>Hover over any link on a webpage to preview and summarize its content.</p>
+      <p>Enable head tracking above for hands-free browsing, or simply hover over any link to preview and get an AI summary in a nutshell!</p>
     </div>
   </div>
   
