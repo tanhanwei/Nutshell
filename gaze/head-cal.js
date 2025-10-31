@@ -159,15 +159,16 @@
   }
 
   function averageSamples(samples) {
-    if (!samples.length) return { nx: NaN, ny: NaN };
+    if (!samples.length) return { nx: NaN, ny: NaN, yaw: NaN, pitch: NaN };
     const sum = samples.reduce((acc, cur) => {
       acc.nx += cur.nx;
       acc.ny += cur.ny;
       return acc;
     }, { nx: 0, ny: 0 });
+    const count = samples.length || 1;
     return {
-      nx: sum.nx / samples.length,
-      ny: sum.ny / samples.length
+      nx: sum.nx / count,
+      ny: sum.ny / count
     };
   }
 
@@ -309,15 +310,25 @@
     calibration.up = upRange;
     calibration.down = downRange;
     calibration.ts = Date.now();
-    chrome.storage.local.set({ [HEAD_CAL_STORAGE_KEY]: calibration }, () => {
-      console.log('[HeadCal] Saved calibration', calibration);
-      updateUI('✅ Head calibration saved', 'Alt+N toggles head-pointer mode');
-      window.dispatchEvent(new CustomEvent('head:calibrated', { detail: calibration }));
-      window.dispatchEvent(new CustomEvent('gaze:status', {
-        detail: { phase: 'live', note: 'head-cal saved' }
-      }));
-      setTimeout(() => stopCalibration('Completed'), 900);
-    });
+    try {
+      chrome.storage.local.set({ [HEAD_CAL_STORAGE_KEY]: calibration }, () => {
+        if (chrome.runtime.lastError) {
+          console.warn('[HeadCal] storage set failed:', chrome.runtime.lastError.message);
+          stopCalibration('Storage unavailable');
+          return;
+        }
+        console.log('[HeadCal] Saved calibration', calibration);
+        updateUI('✅ Head calibration saved', 'Alt+N toggles head-pointer mode');
+        window.dispatchEvent(new CustomEvent('head:calibrated', { detail: calibration }));
+        window.dispatchEvent(new CustomEvent('gaze:status', {
+          detail: { phase: 'live', note: 'head-cal saved' }
+        }));
+        setTimeout(() => stopCalibration('Completed'), 900);
+      });
+    } catch (error) {
+      console.warn('[HeadCal] calibration persistence failed:', error);
+      stopCalibration('Storage unavailable');
+    }
   }
 
   function handleBlinkRelease(event) {
@@ -330,9 +341,14 @@
 
   function handleHeadFrame(event) {
     if (!event.detail) return;
-    const { nx, ny } = event.detail;
+    const { nx, ny, yaw, pitch } = event.detail;
     if (!Number.isFinite(nx) || !Number.isFinite(ny)) return;
-    window.__lastHeadFrame = { nx, ny };
+    window.__lastHeadFrame = {
+      nx,
+      ny,
+      yaw: Number.isFinite(yaw) ? yaw : (window.__lastHeadFrame && Number.isFinite(window.__lastHeadFrame.yaw) ? window.__lastHeadFrame.yaw : 0),
+      pitch: Number.isFinite(pitch) ? pitch : (window.__lastHeadFrame && Number.isFinite(window.__lastHeadFrame.pitch) ? window.__lastHeadFrame.pitch : 0)
+    };
   }
 
   document.addEventListener('keydown', (event) => {

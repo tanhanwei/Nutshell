@@ -15,7 +15,15 @@
   const HEAD_FILTER_D_CUTOFF = 1.0;
   const HEAD_POINTER_LERP = 0.2;
   const HEAD_TRANSLATION_GAIN = 1;
-  const HEAD_ROTATION_INFLUENCE = 0.35;
+  const HEAD_ROTATION_INFLUENCE = 0.22;
+  const HEAD_ROTATION_EDGE_GAIN = 0.35;
+  const HEAD_CENTER_THRESHOLD = 0.25;
+  const HEAD_EDGE_THRESHOLD = 0.7;
+  const HEAD_CENTER_LERP = 0.06;
+  const HEAD_EDGE_LERP = 0.10;
+  const PITCH_FALLBACK_THRESHOLD = 0.32;
+  const TRANSLATION_MIN_RATIO = 0.24;
+  const VERTICAL_EDGE_SCALE = 1.35;
   const HEAD_YAW_SCALE = 25;
   const HEAD_PITCH_SCALE = 20;
   const BLINK_LEFT_THRESHOLD_MS = 1000;
@@ -665,6 +673,9 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
 
     window.__lastFace = face;
 
+    const yawDeg = Number(face.rotation && face.rotation.angle ? face.rotation.angle.yaw : 0);
+    const pitchDeg = Number(face.rotation && face.rotation.angle ? face.rotation.angle.pitch : 0);
+
     let headFrame = null;
     try {
       headFrame = computeHeadFrame(face);
@@ -677,16 +688,13 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
     }
     if (headFrame) {
       headFrameErrorLogged = false;
-      window.__lastHeadFrame = { nx: headFrame.nx, ny: headFrame.ny };
+      window.__lastHeadFrame = { nx: headFrame.nx, ny: headFrame.ny, yaw: yawDeg, pitch: pitchDeg };
       window.dispatchEvent(new CustomEvent('head:frame', {
-        detail: { nx: headFrame.nx, ny: headFrame.ny, ts }
+        detail: { nx: headFrame.nx, ny: headFrame.ny, yaw: yawDeg, pitch: pitchDeg, ts }
       }));
     } else {
       window.__lastHeadFrame = null;
     }
-
-    const yawDeg = Number(face.rotation && face.rotation.angle ? face.rotation.angle.yaw : 0);
-    const pitchDeg = Number(face.rotation && face.rotation.angle ? face.rotation.angle.pitch : 0);
 
     if (Array.isArray(face.mesh)) {
       if (!earCal) {
@@ -745,41 +753,48 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
         const offsetNx = headFrame.nx - centerNx;
         const offsetNy = headFrame.ny - centerNy;
 
-        let normX = 0;
-        if (offsetNx < 0) {
-          normX = offsetNx / leftRange;
-        } else {
-          normX = offsetNx / rightRange;
-        }
+        let normX = offsetNx < 0 ? offsetNx / leftRange : offsetNx / rightRange;
+        const normYTrans = offsetNy < 0 ? offsetNy / upRange : offsetNy / downRange;
+        let normY = (-pitchDeg / HEAD_PITCH_SCALE) + normYTrans * 0.35;
 
-        let normY = 0;
-        if (offsetNy < 0) {
-          normY = offsetNy / upRange;
-        } else {
-          normY = offsetNy / downRange;
-        }
+        const translationRatioX = Math.abs(offsetNx) / (offsetNx < 0 ? leftRange : rightRange);
+        const translationRatioY = Math.abs(offsetNy) / (offsetNy < 0 ? upRange : downRange);
 
         if (Math.abs(normX) < 1) {
-          normX += yawNorm * HEAD_ROTATION_INFLUENCE * (1 - Math.abs(normX));
+          normX += yawNorm * HEAD_ROTATION_INFLUENCE * (1 - Math.min(1, Math.abs(normX)));
         }
         if (Math.abs(normY) < 1) {
-          normY += (-pitchNorm) * HEAD_ROTATION_INFLUENCE * (1 - Math.abs(normY));
+          normY += (-pitchNorm) * (HEAD_ROTATION_INFLUENCE * 0.6) * (1 - Math.min(1, Math.abs(normY)));
+        }
+
+        if (Math.abs(normY) > HEAD_EDGE_THRESHOLD && translationRatioY < TRANSLATION_MIN_RATIO && Math.abs(pitchNorm) > PITCH_FALLBACK_THRESHOLD) {
+          const edgeBlend = HEAD_ROTATION_EDGE_GAIN * Math.sign(-pitchNorm);
+          normY = Math.max(-1.4, Math.min(1.4, normY + edgeBlend));
         }
 
         normX = Math.max(-1.2, Math.min(1.2, normX));
-        normY = Math.max(-1.2, Math.min(1.2, normY));
+        normY = Math.max(-1.4, Math.min(1.4, normY));
+
+        const scaledUpRange = upRange * (normY < 0 ? VERTICAL_EDGE_SCALE : 1);
+        const scaledDownRange = downRange * (normY > 0 ? VERTICAL_EDGE_SCALE : 1);
 
         const targetNx = normX < 0 ? centerNx + normX * leftRange : centerNx + normX * rightRange;
-        const targetNy = normY < 0 ? centerNy + normY * upRange : centerNy + normY * downRange;
+        const targetNy = normY < 0 ? centerNy + normY * scaledUpRange : centerNy + normY * scaledDownRange;
         const mapped = mapHeadLocalToXY(targetNx, targetNy, activeCal);
         if (mapped) {
           const filteredX = headFilterX(mapped[0], ts);
           const filteredY = headFilterY(mapped[1], ts);
           let finalX = Number.isFinite(filteredX) ? filteredX : mapped[0];
           let finalY = Number.isFinite(filteredY) ? filteredY : mapped[1];
+          let smoothingAlpha = HEAD_POINTER_LERP;
+          if (Math.abs(normX) < HEAD_CENTER_THRESHOLD && Math.abs(normY) < HEAD_CENTER_THRESHOLD) {
+            smoothingAlpha = HEAD_CENTER_LERP;
+          } else if (Math.abs(normX) > HEAD_EDGE_THRESHOLD || Math.abs(normY) > HEAD_EDGE_THRESHOLD) {
+            smoothingAlpha = HEAD_EDGE_LERP;
+          }
           if (lastHeadPoint) {
-            finalX = lastHeadPoint[0] + HEAD_POINTER_LERP * (finalX - lastHeadPoint[0]);
-            finalY = lastHeadPoint[1] + HEAD_POINTER_LERP * (finalY - lastHeadPoint[1]);
+            finalX = lastHeadPoint[0] + smoothingAlpha * (finalX - lastHeadPoint[0]);
+            finalY = lastHeadPoint[1] + smoothingAlpha * (finalY - lastHeadPoint[1]);
             lastHeadPoint[0] = finalX;
             lastHeadPoint[1] = finalY;
           } else {
@@ -810,15 +825,10 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
       return;
     }
 
-    if (window.__gazeHeadCalActive) {
-      lastPointTs = now;
-      return;
-    }
-
-    if (window.__gazeHeadCalActive) {
-      lastPointTs = now;
-      return;
-    }
+   if (window.__gazeHeadCalActive) {
+     lastPointTs = now;
+     return;
+   }
 
     if (now - lastPointTs >= POINT_THROTTLE_MS) {
       lastPointTs = now;
