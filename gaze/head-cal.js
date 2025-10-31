@@ -206,6 +206,10 @@
       'Press Esc to cancel',
       true  // Show button
     );
+
+    // Dispatch event to hide tooltip and pointer during calibration
+    window.dispatchEvent(new CustomEvent('gaze:calibration-started'));
+
     console.log('[HeadCal] Waiting for user to click begin');
   }
 
@@ -216,6 +220,10 @@
     window.__gazeHeadCalActive = false;
     stopCapture();
     setUIVisible(false);
+
+    // Dispatch event to restore tooltip and pointer after calibration
+    window.dispatchEvent(new CustomEvent('gaze:calibration-stopped'));
+
     if (message) {
       console.log('[HeadCal]', message);
     }

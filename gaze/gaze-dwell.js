@@ -867,6 +867,15 @@
         dwellAccum = 0;
       }
     });
+    window.addEventListener('gaze:calibration-started', () => {
+      // Hide tooltip during calibration
+      cancelActiveJob('calibration_started');
+      console.debug('[GazeDwell] Tooltip hidden for calibration');
+    });
+    window.addEventListener('gaze:calibration-stopped', () => {
+      // Tooltip will naturally reappear when user looks at links
+      console.debug('[GazeDwell] Calibration ended, tooltip can reappear');
+    });
     chrome.runtime.onMessage.addListener(handleRuntimeMessage);
     chrome.storage.onChanged.addListener(handleStorageChange);
     document.addEventListener('keydown', handleKeydown, true);

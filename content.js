@@ -1836,6 +1836,12 @@
       });
       document.dispatchEvent(event);
     }
+
+    if (message.type === 'PING') {
+      // Respond to ping to confirm content script is loaded
+      sendResponse({ status: 'ok' });
+      return true;
+    }
   });
 
   // Listen for gaze:status events and relay to sidepanel

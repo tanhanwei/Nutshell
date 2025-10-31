@@ -201,7 +201,7 @@ function setupEventListeners() {
 
   // Gaze enabled toggle
   if (elements.gazeEnabled) {
-    elements.gazeEnabled.addEventListener('change', (e) => {
+    elements.gazeEnabled.addEventListener('change', async (e) => {
       settings.gazeEnabled = e.target.checked;
       saveSettings();
 
@@ -215,6 +215,25 @@ function setupEventListeners() {
         updateGazeStatus('ready', 'Disabled');
       } else {
         updateGazeStatus('loading', 'Initializing...');
+
+        // When enabling, check if content scripts are loaded
+        // If not, refresh the page to inject them
+        chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+          if (tabs[0]) {
+            try {
+              // Try to ping the content script
+              await chrome.tabs.sendMessage(tabs[0].id, { type: 'PING' });
+              console.log('[Sidepanel] Content script already loaded');
+            } catch (error) {
+              // Content script not loaded, refresh the page
+              console.log('[Sidepanel] Content script not loaded, refreshing page...');
+              updateGazeStatus('loading', 'Refreshing page...');
+              setTimeout(() => {
+                chrome.tabs.reload(tabs[0].id);
+              }, 300);
+            }
+          }
+        });
       }
 
       console.log('[Sidepanel] Gaze tracking toggled:', settings.gazeEnabled);
