@@ -17,9 +17,8 @@
       <div class="setting-group">
         <label class="setting-label" for="display-mode">Display Location:</label>
         <select id="display-mode" class="setting-select">
-          <option value="both">Side Panel + Tooltip</option>
           <option value="panel">Side Panel Only</option>
-          <option value="tooltip">Tooltip Only</option>
+          <option value="tooltip" selected>Tooltip Only</option>
         </select>
       </div>
       
@@ -39,7 +38,48 @@
         <textarea id="custom-prompt" rows="3" placeholder="Enter your summarization prompt...">Summarize this article in 2-3 sentences</textarea>
       </div>
     </div>
-    
+
+    <!-- Head Tracking Section -->
+    <div id="gaze-section">
+      <h3>🎯 Head Tracking (Hands-Free)</h3>
+
+      <div class="setting-group">
+        <label class="toggle-container">
+          <input type="checkbox" id="gaze-enabled" checked>
+          <span class="toggle-slider"></span>
+          <span class="toggle-label">Enable Head Tracking</span>
+        </label>
+      </div>
+
+      <div class="status-indicator">
+        <span class="status-dot" id="gaze-status-dot"></span>
+        <span id="gaze-status-text">Disabled</span>
+      </div>
+
+      <button id="calibrate-btn" class="btn secondary">
+        Calibrate Head Position
+      </button>
+      <p class="help-text">Press Alt+H or click to calibrate</p>
+
+      <div class="setting-group">
+        <label class="setting-label" for="dwell-time">
+          Dwell Time: <span id="dwell-value">600</span>ms
+        </label>
+        <input type="range" id="dwell-time" min="300" max="1200" step="50" value="600" class="slider">
+        <p class="help-text">Time to hover before clicking a link</p>
+      </div>
+
+      <details class="keyboard-shortcuts">
+        <summary>Keyboard Shortcuts</summary>
+        <ul>
+          <li><kbd>Alt+H</kbd> - Calibrate head tracking</li>
+          <li><kbd>Alt+P</kbd> - Toggle pointer visibility</li>
+          <li><kbd>Alt+V</kbd> - Toggle camera preview</li>
+          <li><kbd>Shift+H</kbd> - Toggle debug HUD</li>
+        </ul>
+      </details>
+    </div>
+
     <hr>
     
     <!-- Loading States -->

@@ -41,13 +41,15 @@
   let currentlyDisplayedUrl = null; // Track what URL the tooltip is currently showing
   let processingElement = null; // Track element being processed for positioning
   let tooltip = null;
+  let tooltipContent = null; // Content wrapper inside tooltip
   let tooltipCloseHandlerAttached = false;
   let twitterHoverTimeout = null;
   let currentTwitterArticle = null;
   let currentTwitterTweetId = null;
   let pendingTwitterThreadId = null;
   let pendingTwitterStartedAt = 0;
-  let displayMode = 'both';
+  let displayMode = 'tooltip';
+  let gazeEnabled = false;
   let currentTooltipPlacement = 'auto';
   let currentYouTubeRequestToken = 0;
   let currentHoveredElement = null;
@@ -63,9 +65,19 @@
   
   // Create tooltip
   function createTooltip() {
-    if (tooltip) return tooltip;
+    // If tooltip exists but doesn't have the content wrapper, recreate it
+    if (tooltip && tooltipContent && tooltipContent.parentNode === tooltip) {
+      return tooltip;
+    }
+
+    // Remove old tooltip if it exists (for clean recreation)
+    if (tooltip && tooltip.parentNode) {
+      tooltip.parentNode.removeChild(tooltip);
+      tooltip = null;
+      tooltipContent = null;
+    }
     
-    // Inject CSS for tooltip list styling
+    // Inject CSS for tooltip list styling and close button
     if (!document.getElementById('hover-tooltip-styles')) {
       const style = document.createElement('style');
       style.id = 'hover-tooltip-styles';
@@ -87,6 +99,31 @@
         #hover-summary-tooltip em {
           font-style: italic;
         }
+        .tooltip-close-btn {
+          position: absolute;
+          top: 8px;
+          right: 8px;
+          width: 24px;
+          height: 24px;
+          border-radius: 50%;
+          background: rgba(0, 0, 0, 0.05);
+          border: none;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 16px;
+          line-height: 1;
+          color: #666;
+          transition: all 0.2s ease;
+          padding: 0;
+          z-index: 1;
+        }
+        .tooltip-close-btn:hover {
+          background: rgba(0, 0, 0, 0.1);
+          color: #333;
+          transform: scale(1.1);
+        }
       `;
       document.head.appendChild(style);
     }
@@ -99,7 +136,7 @@
       background: white;
       border-radius: 12px;
       box-shadow: 0 10px 40px rgba(0,0,0,0.2), 0 2px 8px rgba(0,0,0,0.1);
-      padding: 16px;
+      padding: 16px 40px 16px 16px;
       max-width: 400px;
       max-height: 500px;
       overflow-y: auto;
@@ -114,20 +151,37 @@
       cursor: auto;
       user-select: text;
     `;
-    
+
+    // Create content wrapper (so innerHTML changes don't remove close button)
+    tooltipContent = document.createElement('div');
+    tooltipContent.className = 'tooltip-content-wrapper';
+    tooltip.appendChild(tooltipContent);
+
+    // Add close button
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'tooltip-close-btn';
+    closeBtn.innerHTML = '×';
+    closeBtn.title = 'Close';
+    closeBtn.setAttribute('data-gaze-clickable', 'true'); // Make it work with gaze dwell
+    closeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      hideTooltip();
+    });
+    tooltip.appendChild(closeBtn);
+
     // Make tooltip interactive - prevent hiding when mouse enters
     tooltip.addEventListener('mouseenter', () => {
       isMouseInTooltip = true;
       clearTimeout(hideTimeout);
       hideTimeout = null;
     });
-    
+
     // Hide with delay when mouse leaves tooltip
     tooltip.addEventListener('mouseleave', () => {
       isMouseInTooltip = false;
       scheduleHide(200); // Short delay when leaving tooltip
     });
-    
+
     document.body.appendChild(tooltip);
     return tooltip;
   }
@@ -960,7 +1014,7 @@
     hideTimeout = null;
     
     const tooltipEl = createTooltip();
-    tooltipEl.innerHTML = content;
+    tooltipContent.innerHTML = content;
     tooltipEl.style.display = 'block';
     attachTooltipDismissHandlers();
     
@@ -1026,8 +1080,8 @@
       
       // Track what URL is currently displayed
       currentlyDisplayedUrl = url;
-      
-      tooltip.innerHTML = content;
+
+      tooltipContent.innerHTML = content;
       tooltip.style.opacity = '1';
       
       const elementForPositioning = currentHoveredElement || processingElement;
@@ -1156,6 +1210,11 @@
   
   // Handle mouseover
   function handleMouseOver(e) {
+    // Skip mouse hover if head tracking is enabled
+    if (gazeEnabled) {
+      return;
+    }
+
     const link = findLink(e.target);
     if (!link) {
       if (IS_TWITTER) {
@@ -1823,13 +1882,54 @@
         hideTooltip();
       }
     }
+
+    if (message.type === 'GAZE_ENABLED_CHANGED') {
+      gazeEnabled = message.gazeEnabled;
+      debugLog('[Content] Gaze enabled updated:', gazeEnabled);
+    }
+
+    if (message.type === 'TRIGGER_CALIBRATION') {
+      debugLog('[Content] Triggering head calibration');
+      // Trigger Alt+H keyboard event to start calibration
+      const event = new KeyboardEvent('keydown', {
+        key: 'h',
+        code: 'KeyH',
+        altKey: true,
+        bubbles: true,
+        cancelable: true
+      });
+      document.dispatchEvent(event);
+    }
+
+    if (message.type === 'PING') {
+      // Respond to ping to confirm content script is loaded
+      sendResponse({ status: 'ok' });
+      return true;
+    }
+  });
+
+  // Listen for gaze:status events and relay to sidepanel
+  window.addEventListener('gaze:status', (event) => {
+    if (event.detail) {
+      chrome.runtime.sendMessage({
+        type: 'GAZE_STATUS',
+        phase: event.detail.phase,
+        note: event.detail.note
+      }).catch(() => {
+        // Ignore errors if sidepanel not open
+      });
+    }
   });
   
-  // Get initial display mode
-  chrome.storage.local.get(['displayMode'], (result) => {
+  // Get initial display mode and gaze enabled status
+  chrome.storage.local.get(['displayMode', 'gazeEnabled'], (result) => {
     if (result.displayMode) {
       displayMode = result.displayMode;
       debugLog('[Content] Initial display mode:', displayMode);
+    }
+    if (typeof result.gazeEnabled === 'boolean') {
+      gazeEnabled = result.gazeEnabled;
+      debugLog('[Content] Initial gaze enabled:', gazeEnabled);
     }
   });
   

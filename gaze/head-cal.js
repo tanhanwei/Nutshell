@@ -31,7 +31,9 @@
   let titleEl = null;
   let hintEl = null;
   let footerEl = null;
+  let beginBtn = null;
   let active = false;
+  let waitingToStart = false;
   let capturing = false;
   let stepIndex = 0;
   let stepSamples = [];
@@ -52,32 +54,68 @@
       display: none;
       align-items: center;
       justify-content: center;
-      pointer-events: none;
+      background: rgba(0, 0, 0, 0.85);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      pointer-events: auto;
     `;
 
     const panel = document.createElement('div');
     panel.style.cssText = `
-      min-width: 280px;
-      max-width: 360px;
-      padding: 20px 24px;
-      border-radius: 16px;
-      background: rgba(8, 12, 28, 0.92);
-      color: #f2f6ff;
+      min-width: 320px;
+      max-width: 420px;
+      padding: 32px 32px;
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.95);
+      color: #1a1a1a;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       text-align: center;
-      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.4);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
       pointer-events: auto;
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.3);
     `;
 
     titleEl = document.createElement('div');
-    titleEl.style.cssText = 'font-size: 18px; font-weight: 600; margin-bottom: 12px;';
+    titleEl.style.cssText = 'font-size: 22px; font-weight: 700; margin-bottom: 16px; color: #1a1a1a; letter-spacing: -0.02em;';
     hintEl = document.createElement('div');
-    hintEl.style.cssText = 'font-size: 14px; opacity: 0.85; margin-bottom: 16px;';
+    hintEl.style.cssText = 'font-size: 16px; opacity: 0.75; margin-bottom: 20px; color: #333; line-height: 1.5;';
+
+    beginBtn = document.createElement('button');
+    beginBtn.textContent = 'Click Here to Begin';
+    beginBtn.style.cssText = `
+      padding: 14px 32px;
+      font-size: 16px;
+      font-weight: 600;
+      color: white;
+      background: #3498db;
+      border: none;
+      border-radius: 12px;
+      cursor: pointer;
+      margin-bottom: 20px;
+      display: none;
+      transition: all 0.2s;
+      box-shadow: 0 4px 12px rgba(52, 152, 219, 0.3);
+    `;
+    beginBtn.onmouseover = () => {
+      beginBtn.style.background = '#2980b9';
+      beginBtn.style.transform = 'translateY(-2px)';
+      beginBtn.style.boxShadow = '0 6px 16px rgba(52, 152, 219, 0.4)';
+    };
+    beginBtn.onmouseout = () => {
+      beginBtn.style.background = '#3498db';
+      beginBtn.style.transform = 'translateY(0)';
+      beginBtn.style.boxShadow = '0 4px 12px rgba(52, 152, 219, 0.3)';
+    };
+    beginBtn.onclick = handleBeginClick;
+
     footerEl = document.createElement('div');
-    footerEl.style.cssText = 'font-size: 12px; opacity: 0.6;';
+    footerEl.style.cssText = 'font-size: 13px; opacity: 0.5; color: #666;';
 
     panel.appendChild(titleEl);
     panel.appendChild(hintEl);
+    panel.appendChild(beginBtn);
     panel.appendChild(footerEl);
     ui.appendChild(panel);
     document.documentElement.appendChild(ui);
@@ -89,11 +127,38 @@
     ui.style.display = visible ? 'flex' : 'none';
   }
 
-  function updateUI(message, hint, footer) {
+  function updateUI(message, hint, footer, showButton = false) {
     ensureUI();
     titleEl.textContent = message;
     hintEl.textContent = hint || '';
     footerEl.textContent = footer || 'Space or long blink (≥1s) to confirm · Esc to cancel';
+
+    if (showButton) {
+      beginBtn.style.display = 'inline-block';
+      footerEl.textContent = 'Press Esc to cancel';
+    } else {
+      beginBtn.style.display = 'none';
+    }
+  }
+
+  function handleBeginClick() {
+    waitingToStart = false;
+    beginActualCalibration();
+  }
+
+  function beginActualCalibration() {
+    stepIndex = 0;
+    updateUI(`Step 1 / ${STEPS.length}: ${STEPS[0].label}`, STEPS[0].hint);
+    const centerX = Math.round((window.innerWidth || 1) / 2);
+    const centerY = Math.round((window.innerHeight || 1) / 2);
+    window.dispatchEvent(new CustomEvent('gaze:status', {
+      detail: { phase: 'calibrating', note: 'center' }
+    }));
+    const now = performance.now();
+    window.dispatchEvent(new CustomEvent('gaze:point', {
+      detail: { x: centerX, y: centerY, conf: 0.95, ts: now }
+    }));
+    console.log('[HeadCal] Calibration steps started');
   }
 
   function stopCapture() {
@@ -119,6 +184,7 @@
   function startCalibration() {
     if (active) return;
     active = true;
+    waitingToStart = true;
     window.__gazeHeadCalActive = true;
     stepIndex = 0;
     calibration = {
@@ -134,25 +200,30 @@
     resetSamples();
     poseAverages = new Array(STEPS.length);
     setUIVisible(true);
-    updateUI(`Step 1 / ${STEPS.length}: ${STEPS[0].label}`, STEPS[0].hint);
-    const centerX = Math.round((window.innerWidth || 1) / 2);
-    const centerY = Math.round((window.innerHeight || 1) / 2);
-    window.dispatchEvent(new CustomEvent('gaze:status', {
-      detail: { phase: 'calibrating', note: 'center' }
-    }));
-    const now = performance.now();
-    window.dispatchEvent(new CustomEvent('gaze:point', {
-      detail: { x: centerX, y: centerY, conf: 0.95, ts: now }
-    }));
-    console.log('[HeadCal] Started');
+    updateUI(
+      'Head Tracking Calibration',
+      'You\'ll be asked to look in 5 different directions. Click the button below to begin.',
+      'Press Esc to cancel',
+      true  // Show button
+    );
+
+    // Dispatch event to hide tooltip and pointer during calibration
+    window.dispatchEvent(new CustomEvent('gaze:calibration-started'));
+
+    console.log('[HeadCal] Waiting for user to click begin');
   }
 
   function stopCalibration(message) {
     if (!active) return;
     active = false;
+    waitingToStart = false;
     window.__gazeHeadCalActive = false;
     stopCapture();
     setUIVisible(false);
+
+    // Dispatch event to restore tooltip and pointer after calibration
+    window.dispatchEvent(new CustomEvent('gaze:calibration-stopped'));
+
     if (message) {
       console.log('[HeadCal]', message);
     }
@@ -365,6 +436,8 @@
     if (!active) return;
     if (event.key === ' ') {
       event.preventDefault();
+      // Ignore SPACE when waiting for user to click begin button
+      if (waitingToStart) return;
       confirmStep().catch((error) => console.warn('[HeadCal] capture failed:', error));
     }
     if (event.key === 'Escape') {

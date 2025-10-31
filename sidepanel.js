@@ -6,7 +6,9 @@
 let settings = {
   apiChoice: 'summarization',
   customPrompt: 'Summarize this article in 2-3 sentences',
-  displayMode: 'both'
+  displayMode: 'tooltip',
+  gazeEnabled: false,
+  gazeDwellMs: 600
 };
 
 let currentContent = {
@@ -41,6 +43,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.customPrompt = document.getElementById('custom-prompt');
     elements.promptContainer = document.getElementById('prompt-container');
     elements.displayMode = document.getElementById('display-mode');
+
+    // Gaze controls
+    elements.gazeEnabled = document.getElementById('gaze-enabled');
+    elements.gazeStatusDot = document.getElementById('gaze-status-dot');
+    elements.gazeStatusText = document.getElementById('gaze-status-text');
+    elements.calibrateBtn = document.getElementById('calibrate-btn');
+    elements.dwellTime = document.getElementById('dwell-time');
+    elements.dwellValue = document.getElementById('dwell-value');
     
     console.log('[Sidepanel] DOM elements retrieved:', {
       displayMode: elements.displayMode,
@@ -76,12 +86,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 // Load settings
 async function loadSettings() {
-  const stored = await chrome.storage.local.get(['apiChoice', 'customPrompt', 'displayMode']);
-  
+  const stored = await chrome.storage.local.get(['apiChoice', 'customPrompt', 'displayMode', 'gazeEnabled', 'gazeDwellMs']);
+
   if (stored.apiChoice) settings.apiChoice = stored.apiChoice;
   if (stored.customPrompt) settings.customPrompt = stored.customPrompt;
   if (stored.displayMode) settings.displayMode = stored.displayMode;
-  
+  if (typeof stored.gazeEnabled === 'boolean') settings.gazeEnabled = stored.gazeEnabled;
+  if (typeof stored.gazeDwellMs === 'number') settings.gazeDwellMs = stored.gazeDwellMs;
+
   // Update UI
   if (elements.radioSummarization && elements.radioPrompt) {
     if (settings.apiChoice === 'summarization') {
@@ -90,15 +102,37 @@ async function loadSettings() {
       elements.radioPrompt.checked = true;
     }
   }
-  
+
   if (elements.customPrompt) {
     elements.customPrompt.value = settings.customPrompt;
   }
-  
+
   if (elements.displayMode) {
     elements.displayMode.value = settings.displayMode;
   }
-  
+
+  if (elements.gazeEnabled) {
+    elements.gazeEnabled.checked = settings.gazeEnabled;
+  }
+
+  if (elements.dwellTime) {
+    elements.dwellTime.value = settings.gazeDwellMs;
+  }
+
+  if (elements.dwellValue) {
+    elements.dwellValue.textContent = settings.gazeDwellMs;
+  }
+
+  // Update calibrate button disabled state
+  if (elements.calibrateBtn) {
+    elements.calibrateBtn.disabled = !settings.gazeEnabled;
+  }
+
+  // Update initial status based on gazeEnabled
+  if (!settings.gazeEnabled) {
+    updateGazeStatus('ready', 'Enable to start');
+  }
+
   togglePromptContainer();
 }
 
@@ -107,7 +141,9 @@ async function saveSettings() {
   await chrome.storage.local.set({
     apiChoice: settings.apiChoice,
     customPrompt: settings.customPrompt,
-    displayMode: settings.displayMode
+    displayMode: settings.displayMode,
+    gazeEnabled: settings.gazeEnabled,
+    gazeDwellMs: settings.gazeDwellMs
   });
 }
 
@@ -162,6 +198,93 @@ function setupEventListeners() {
       }
     });
   }
+
+  // Gaze enabled toggle
+  if (elements.gazeEnabled) {
+    elements.gazeEnabled.addEventListener('change', async (e) => {
+      settings.gazeEnabled = e.target.checked;
+      saveSettings();
+
+      // Notify content script of the change
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs[0]) {
+          chrome.tabs.sendMessage(tabs[0].id, {
+            type: 'GAZE_ENABLED_CHANGED',
+            gazeEnabled: settings.gazeEnabled
+          }).catch(() => {
+            // Ignore if content script not loaded yet
+          });
+        }
+      });
+
+      // Update calibrate button disabled state
+      if (elements.calibrateBtn) {
+        elements.calibrateBtn.disabled = !settings.gazeEnabled;
+      }
+
+      // Update status text immediately to prevent race conditions
+      if (!settings.gazeEnabled) {
+        updateGazeStatus('ready', 'Disabled');
+      } else {
+        updateGazeStatus('loading', 'Initializing...');
+
+        // When enabling, check if content scripts are loaded
+        // If not, refresh the page to inject them
+        chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+          if (tabs[0]) {
+            try {
+              // Try to ping the content script
+              await chrome.tabs.sendMessage(tabs[0].id, { type: 'PING' });
+              console.log('[Sidepanel] Content script already loaded');
+            } catch (error) {
+              // Content script not loaded, refresh the page
+              console.log('[Sidepanel] Content script not loaded, refreshing page...');
+              updateGazeStatus('loading', 'Refreshing page...');
+              setTimeout(() => {
+                chrome.tabs.reload(tabs[0].id);
+              }, 300);
+            }
+          }
+        });
+      }
+
+      console.log('[Sidepanel] Gaze tracking toggled:', settings.gazeEnabled);
+    });
+  }
+
+  // Calibrate button
+  if (elements.calibrateBtn) {
+    elements.calibrateBtn.addEventListener('click', () => {
+      console.log('[Sidepanel] Calibrate button clicked');
+
+      // Blur the button to prevent SPACE from re-clicking it
+      elements.calibrateBtn.blur();
+
+      // Send message to active tab to trigger calibration
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs[0]) {
+          chrome.tabs.sendMessage(tabs[0].id, {
+            type: 'TRIGGER_CALIBRATION'
+          }).catch((error) => {
+            console.error('[Sidepanel] Failed to trigger calibration:', error);
+          });
+        }
+      });
+    });
+  }
+
+  // Dwell time slider
+  if (elements.dwellTime) {
+    elements.dwellTime.addEventListener('input', (e) => {
+      const value = parseInt(e.target.value, 10);
+      settings.gazeDwellMs = value;
+      if (elements.dwellValue) {
+        elements.dwellValue.textContent = value;
+      }
+      saveSettings();
+      console.log('[Sidepanel] Dwell time updated:', value);
+    });
+  }
 }
 
 // Toggle prompt container
@@ -182,19 +305,54 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       updateSummaryDisplay(message.content);
     }
   }
-  
+
   if (message.type === 'PROCESSING_STATUS') {
     if (message.status === 'started') {
       showProcessing(message.title);
     }
   }
-  
+
   if (message.type === 'DISPLAY_CACHED_SUMMARY') {
     if (settings.displayMode === 'panel' || settings.displayMode === 'both') {
       displayCachedSummary(message.title, message.summary);
     }
   }
+
+  if (message.type === 'GAZE_STATUS') {
+    updateGazeStatus(message.phase, message.note);
+  }
 });
+
+// Update gaze status indicator
+function updateGazeStatus(phase, note) {
+  if (!elements.gazeStatusDot || !elements.gazeStatusText) {
+    return;
+  }
+
+  // Remove all status classes
+  elements.gazeStatusDot.className = 'status-dot';
+
+  // Check if disabled based on note
+  if (note && note.toLowerCase().includes('disabled')) {
+    elements.gazeStatusText.textContent = 'Disabled';
+    return;
+  }
+
+  // Map phase to status
+  const statusMap = {
+    'loading': { class: 'loading', text: 'Loading models...' },
+    'ready': { class: 'ready', text: note || 'Ready to calibrate' },
+    'live': { class: 'live', text: note || 'Active & tracking' },
+    'calibrating': { class: 'loading', text: 'Calibrating...' }
+  };
+
+  const status = statusMap[phase] || { class: '', text: note || 'Unknown' };
+
+  if (status.class) {
+    elements.gazeStatusDot.classList.add(status.class);
+  }
+  elements.gazeStatusText.textContent = status.text;
+}
 
 // Show states
 function hideAll() {

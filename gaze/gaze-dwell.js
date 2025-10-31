@@ -21,6 +21,8 @@
   let dwellThreshold = DEFAULT_DWELL_MS;
   let phase = 'ready';
   let tooltip = null;
+  let tooltipContent = null; // Content wrapper inside tooltip
+  let tooltipCloseBtn = null; // Reference to close button for magnetic snap
   let currentJob = null;
   let dwellTarget = null;
   let dwellAccum = 0;
@@ -33,6 +35,7 @@
   let effectiveX = null;
   let effectiveY = null;
   let snappedLink = null;
+  let snappedTarget = null; // Can be link or close button
   let lastSnapLink = null;
   let scrollZones = null;
   let dwellIndicator = null;
@@ -46,8 +49,13 @@
   const processingMessage = '<div style="opacity:0.6;font-style:italic;">Generating summary...</div>';
 
   function ensureScrollZones() {
-    if (scrollZones) {
+    // Check if zones exist AND are in the DOM
+    if (scrollZones && scrollZones.parentNode) {
       return scrollZones;
+    }
+    // If body doesn't exist yet, can't create zones
+    if (!document.body) {
+      return null;
     }
     scrollZones = document.createElement('div');
     scrollZones.id = SCROLL_ZONE_ID;
@@ -163,7 +171,7 @@
         background: #ffffff;
         border-radius: 12px;
         box-shadow: 0 12px 48px rgba(15, 18, 32, 0.22);
-        padding: 16px;
+        padding: 16px 40px 16px 16px;
         max-width: 420px;
         max-height: 520px;
         overflow-y: auto;
@@ -194,20 +202,80 @@
       }
       #${TOOLTIP_ID} strong { font-weight: 600; }
       #${TOOLTIP_ID} em { font-style: italic; }
+      .gaze-tooltip-close-btn {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        background: rgba(0, 0, 0, 0.05);
+        border: none;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+        line-height: 1;
+        color: #666;
+        transition: all 0.2s ease;
+        padding: 0;
+        z-index: 1;
+      }
+      .gaze-tooltip-close-btn:hover {
+        background: rgba(0, 0, 0, 0.1);
+        color: #333;
+        transform: scale(1.1);
+      }
     `;
     document.head.appendChild(style);
   }
 
   function ensureTooltip() {
-    if (tooltip) {
+    // If tooltip exists but doesn't have the content wrapper, recreate it
+    if (tooltip && tooltipContent && tooltipContent.parentNode === tooltip) {
       return tooltip;
     }
+
+    // Remove old tooltip if it exists (for clean recreation)
+    if (tooltip && tooltip.parentNode) {
+      tooltip.parentNode.removeChild(tooltip);
+      tooltip = null;
+      tooltipContent = null;
+    }
+
     ensureTooltipStyles();
     tooltip = document.createElement('div');
     tooltip.id = TOOLTIP_ID;
+
+    // Create content wrapper (so innerHTML changes don't remove close button)
+    tooltipContent = document.createElement('div');
+    tooltipContent.className = 'gaze-tooltip-content-wrapper';
+    tooltip.appendChild(tooltipContent);
+
+    // Add close button
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'gaze-tooltip-close-btn';
+    closeBtn.innerHTML = '×';
+    closeBtn.title = 'Close (or dwell to click)';
+    closeBtn.setAttribute('data-gaze-clickable', 'true'); // Make it work with gaze dwell
+    closeBtn.setAttribute('data-is-close-button', 'true'); // Mark as close button for detection
+    closeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      hideTooltip();
+      // Clear current job so tooltip doesn't reappear
+      if (currentJob) {
+        currentJob = null;
+      }
+    });
+    tooltip.appendChild(closeBtn);
+    tooltipCloseBtn = closeBtn; // Save reference for magnetic snap
+
     tooltip.addEventListener('mouseenter', () => {
       dwellAccum = 0;
     });
+
     document.body.appendChild(tooltip);
     return tooltip;
   }
@@ -218,7 +286,7 @@
       return;
     }
     const tip = ensureTooltip();
-    tip.innerHTML = html;
+    tooltipContent.innerHTML = html;
     tip.style.display = 'block';
     tip.style.opacity = '0';
     positionTooltip(link);
@@ -231,9 +299,9 @@
     if (!tooltip) return;
     tooltip.style.opacity = '0';
     setTimeout(() => {
-      if (tooltip) {
+      if (tooltip && tooltipContent) {
         tooltip.style.display = 'none';
-        tooltip.innerHTML = '';
+        tooltipContent.innerHTML = '';
       }
     }, 180);
   }
@@ -331,6 +399,34 @@
     return best;
   }
 
+  function nearestTarget(x, y, maxDistance = 42) {
+    // Check close button first if tooltip is visible
+    if (tooltipCloseBtn && tooltip && tooltip.style.display === 'block') {
+      const btnRect = tooltipCloseBtn.getBoundingClientRect();
+      if (btnRect && btnRect.width > 0 && btnRect.height > 0) {
+        const cx = btnRect.left + btnRect.width / 2;
+        const cy = btnRect.top + btnRect.height / 2;
+        const dist = Math.hypot(cx - x, cy - y);
+        // Use same maxDistance for consistency
+        if (dist < maxDistance) {
+          return { element: tooltipCloseBtn, type: 'close-button', distance: dist };
+        }
+      }
+    }
+
+    // Find nearest link
+    const link = nearestLink(x, y, maxDistance);
+    if (link) {
+      const rect = link.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const dist = Math.hypot(cx - x, cy - y);
+      return { element: link, type: 'link', distance: dist };
+    }
+
+    return null;
+  }
+
   function applyDeadzone(x, y) {
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
       return { x, y };
@@ -372,7 +468,41 @@
     return snappedLink;
   }
 
+  function snapTarget(x, y) {
+    // Check if current snapped target is still valid
+    if (snappedTarget && snappedTarget.element && (!document.contains(snappedTarget.element))) {
+      snappedTarget = null;
+    }
+
+    // If we have a snapped target, check if we're still within sticky radius
+    if (snappedTarget && snappedTarget.element) {
+      const rect = snappedTarget.element.getBoundingClientRect();
+      if (rect && rect.width && rect.height) {
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        if (Math.hypot(cx - x, cy - y) < STICKY_RADIUS_PX) {
+          return snappedTarget;
+        }
+      }
+      snappedTarget = null;
+    }
+
+    // Find nearest target (link or close button)
+    const next = nearestTarget(x, y, 42);
+    if (next) {
+      snappedTarget = next;
+      // Also update lastSnapLink if it's a link
+      if (next.type === 'link') {
+        lastSnapLink = next.element;
+      }
+    }
+    return snappedTarget;
+  }
+
   function edgeLoop(x, y) {
+    // Ensure scroll zones are created (in case body wasn't ready during init)
+    ensureScrollZones();
+
     const now = performance.now();
     const w = window.innerWidth;
     const h = window.innerHeight;
@@ -477,40 +607,53 @@
     const delta = Math.max(0, Math.min(500, ts - lastPointTs));
     lastPointTs = ts;
 
-    const link = snapLink(x, y);
-    if (link) {
-      lastSnapLink = link;
-    } else {
+    const target = snapTarget(x, y);
+    const targetElement = target ? target.element : null;
+
+    if (target && target.type === 'link') {
+      lastSnapLink = target.element;
+    } else if (!target) {
       lastSnapLink = null;
     }
 
     if (DEBUG_DWELL) {
-      const href = link && link.href ? link.href : null;
-      if (href !== debugLastHref) {
-        console.debug('[GazeDwell] target:', href);
-        debugLastHref = href;
+      const href = (target && target.type === 'link' && target.element.href) ? target.element.href : null;
+      const label = target ? (target.type === 'close-button' ? '[CLOSE BUTTON]' : href) : null;
+      if (label !== debugLastHref) {
+        console.debug('[GazeDwell] target:', label);
+        debugLastHref = label;
       }
     }
 
-    if (link !== dwellTarget) {
-      dwellTarget = link;
+    if (targetElement !== dwellTarget) {
+      dwellTarget = targetElement;
       dwellAccum = 0;
       hideDwellIndicator();
     }
 
-    if (!link) {
+    if (!targetElement) {
       hideDwellIndicator();
       return;
     }
 
     dwellAccum += delta;
     const progress = Math.min(1, dwellAccum / dwellThreshold);
-    updateDwellIndicator(link, progress);
+    updateDwellIndicator(targetElement, progress);
 
     if (dwellAccum >= dwellThreshold) {
       dwellAccum = 0;
       hideDwellIndicator();
-      triggerSummary(link);
+
+      if (target.type === 'close-button') {
+        // Close the tooltip
+        hideTooltip();
+        if (currentJob) {
+          currentJob = null;
+        }
+      } else if (target.type === 'link') {
+        // Trigger summary
+        triggerSummary(target.element);
+      }
     }
   }
 
@@ -866,6 +1009,16 @@
       if (phase !== 'live') {
         dwellAccum = 0;
       }
+    });
+    window.addEventListener('gaze:calibration-started', () => {
+      // Forcibly hide tooltip during calibration (both active and completed)
+      cancelActiveJob('calibration_started');
+      hideTooltip();
+      console.debug('[GazeDwell] Tooltip forcibly hidden for calibration');
+    });
+    window.addEventListener('gaze:calibration-stopped', () => {
+      // Tooltip will naturally reappear when user looks at links
+      console.debug('[GazeDwell] Calibration ended, tooltip can reappear');
     });
     chrome.runtime.onMessage.addListener(handleRuntimeMessage);
     chrome.storage.onChanged.addListener(handleStorageChange);

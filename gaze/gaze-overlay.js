@@ -31,6 +31,41 @@
   document.addEventListener('keydown', handleKeyDown, true);
   window.addEventListener('gaze:status', handleStatus);
   window.addEventListener('gaze:point', handlePoint);
+  window.addEventListener('gaze:calibration-started', handleCalibrationStarted);
+  window.addEventListener('gaze:calibration-stopped', handleCalibrationStopped);
+  chrome.storage.onChanged.addListener(handleStorageChange);
+
+  function handleStorageChange(changes, areaName) {
+    if (areaName !== 'local') return;
+    if (changes.gazeEnabled) {
+      const enabled = Boolean(changes.gazeEnabled.newValue);
+      if (!enabled) {
+        // Hide UI when disabled and reset state
+        hasPointerPosition = false;
+        fpsEMA = 0;
+        lastConfidence = null;
+        setPointerVisible(false);
+        setPreviewVisible(false);
+      } else {
+        // Show UI when re-enabled
+        setPreviewVisible(true);
+        // Pointer will show automatically when first point arrives
+        pointerVisible = true;
+      }
+    }
+  }
+
+  function handleCalibrationStarted() {
+    // Hide pointer during calibration so it doesn't cover instructions
+    setPointerVisible(false);
+    console.debug('[GazeOverlay] Pointer hidden for calibration');
+  }
+
+  function handleCalibrationStopped() {
+    // Restore pointer after calibration
+    setPointerVisible(true);
+    console.debug('[GazeOverlay] Pointer restored after calibration');
+  }
 
   function injectStyles() {
     if (document.getElementById(STYLE_ID)) {

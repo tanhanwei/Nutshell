@@ -61,6 +61,9 @@
   let headFilterX = null;
   let headFilterY = null;
   let lastHeadPoint = null;
+  let detectInProgress = false;
+  let framesSkipped = 0;
+  let detectDurations = [];
 let headModeWarned = false;
 let headFrameErrorLogged = false;
 let headAutoCenter = { nx: 0, ny: 0, ready: false };
@@ -614,19 +617,45 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
           videoFrameHandle = null;
           return;
         }
+
+        // Request next frame immediately (don't wait for AI inference)
+        const nextVideo = video;
+        if (nextVideo && typeof nextVideo.requestVideoFrameCallback === 'function') {
+          videoFrameHandle = nextVideo.requestVideoFrameCallback(onFrame);
+        } else {
+          videoFrameHandle = null;
+        }
+
+        // Skip this frame if previous detection still in progress
+        if (detectInProgress) {
+          framesSkipped++;
+          return;
+        }
+
+        detectInProgress = true;
         try {
           const startTs = performance.now();
           const result = await human.detect(currentVideo);
+          const endTs = performance.now();
+          const duration = endTs - startTs;
+
+          // Track performance
+          detectDurations.push(duration);
+          if (detectDurations.length > 30) {
+            detectDurations.shift();
+          }
+          if (detectDurations.length === 30) {
+            const avg = detectDurations.reduce((a, b) => a + b, 0) / detectDurations.length;
+            console.debug(`[GazeCore] detect() avg: ${avg.toFixed(1)}ms, frames skipped: ${framesSkipped}`);
+            detectDurations.length = 0;
+            framesSkipped = 0;
+          }
+
           processDetection(result, startTs);
         } catch (error) {
           console.warn('[GazeCore] detect failed:', error);
         } finally {
-          const nextVideo = video;
-          if (nextVideo && typeof nextVideo.requestVideoFrameCallback === 'function') {
-            videoFrameHandle = nextVideo.requestVideoFrameCallback(onFrame);
-          } else {
-            videoFrameHandle = null;
-          }
+          detectInProgress = false;
         }
       };
       videoFrameHandle = video.requestVideoFrameCallback(onFrame);
@@ -637,19 +666,46 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
           rafHandle = null;
           return;
         }
-        try {
-          if (currentVideo.readyState >= 2) {
-            const startTs = performance.now();
-            const result = await human.detect(currentVideo);
-            processDetection(result, startTs);
-          }
-        } catch (error) {
-          console.warn('[GazeCore] detect failed:', error);
-        }
+
+        // Request next frame immediately (don't wait for AI inference)
         if (video && human) {
           rafHandle = requestAnimationFrame(step);
         } else {
           rafHandle = null;
+        }
+
+        // Skip this frame if previous detection still in progress
+        if (detectInProgress) {
+          framesSkipped++;
+          return;
+        }
+
+        try {
+          if (currentVideo.readyState >= 2) {
+            detectInProgress = true;
+            const startTs = performance.now();
+            const result = await human.detect(currentVideo);
+            const endTs = performance.now();
+            const duration = endTs - startTs;
+
+            // Track performance
+            detectDurations.push(duration);
+            if (detectDurations.length > 30) {
+              detectDurations.shift();
+            }
+            if (detectDurations.length === 30) {
+              const avg = detectDurations.reduce((a, b) => a + b, 0) / detectDurations.length;
+              console.debug(`[GazeCore] detect() avg: ${avg.toFixed(1)}ms, frames skipped: ${framesSkipped}`);
+              detectDurations.length = 0;
+              framesSkipped = 0;
+            }
+
+            processDetection(result, startTs);
+            detectInProgress = false;
+          }
+        } catch (error) {
+          console.warn('[GazeCore] detect failed:', error);
+          detectInProgress = false;
         }
       };
       rafHandle = requestAnimationFrame(step);
@@ -698,13 +754,14 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
       window.__lastHeadFrame = null;
     }
 
-    if (Array.isArray(face.mesh)) {
-      if (!earCal) {
-        ensureEarCalibration(face.mesh, ts);
-      } else {
-        updateBlinkState(face.mesh, ts);
-      }
-    }
+    // Blink detection disabled - was causing issues and not accurate enough
+    // if (Array.isArray(face.mesh)) {
+    //   if (!earCal) {
+    //     ensureEarCalibration(face.mesh, ts);
+    //   } else {
+    //     updateBlinkState(face.mesh, ts);
+    //   }
+    // }
 
     if (!probePrinted) {
       probeFace(face);
@@ -1013,6 +1070,16 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
       video.parentElement.removeChild(video);
       video = null;
     }
+
+    // Reset initialization state so re-enabling works properly
+    initializationPromise = null;
+    human = null;
+    detectInProgress = false;
+
+    // Reset detection tracking
+    framesSkipped = 0;
+    detectDurations = [];
+    probePrinted = false;
   }
 
   function handleStorageChange(changes, areaName) {
@@ -1020,7 +1087,12 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
     if (changes[GAZE_ENABLED_KEY]) {
       gazeEnabled = Boolean(changes[GAZE_ENABLED_KEY].newValue);
       if (gazeEnabled) {
+        dispatchStatus('loading', 'Initializing...');
         ensureInitialized().catch(() => {});
+      } else {
+        // Disable head tracking
+        teardown();
+        dispatchStatus('ready', 'Disabled');
       }
     }
     if (changes[HEAD_CAL_STORAGE_KEY]) {
@@ -1104,14 +1176,14 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
     if (typeof store[GAZE_ENABLED_KEY] === 'boolean') {
       gazeEnabled = store[GAZE_ENABLED_KEY];
     } else {
-      gazeEnabled = true;
-      storageSet({ [GAZE_ENABLED_KEY]: true });
+      gazeEnabled = false;
+      storageSet({ [GAZE_ENABLED_KEY]: false });
     }
 
     if (gazeEnabled) {
       ensureInitialized().catch(() => {});
     } else {
-      dispatchStatus('ready', 'Enable gaze tracking to start head pointer');
+      dispatchStatus('ready', 'Enable gaze tracking to start');
     }
   });
 })();

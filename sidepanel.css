@@ -437,3 +437,246 @@ hr {
     width: 45vw;
   }
 }
+
+/* Gaze Section */
+#gaze-section {
+  background: #f8f9fa;
+  padding: 16px;
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+
+#gaze-section h3 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: #1a1a1a;
+}
+
+/* Toggle Switch */
+.toggle-container {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle-container input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+  background: #ccc;
+  border-radius: 24px;
+  transition: background 0.3s;
+  margin-right: 10px;
+  flex-shrink: 0;
+}
+
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  left: 3px;
+  top: 3px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.3s;
+}
+
+.toggle-container input:checked + .toggle-slider {
+  background: #3498db;
+}
+
+.toggle-container input:checked + .toggle-slider::before {
+  transform: translateX(20px);
+}
+
+.toggle-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: #333;
+}
+
+/* Status Indicator */
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: white;
+  border-radius: 6px;
+  font-size: 13px;
+  margin-bottom: 12px;
+  border: 1px solid #e0e0e0;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #95a5a6;
+  flex-shrink: 0;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.status-dot.loading {
+  background: #f39c12;
+}
+
+.status-dot.ready {
+  background: #e74c3c;
+}
+
+.status-dot.calibrated {
+  background: #2ecc71;
+}
+
+.status-dot.live {
+  background: #2ecc71;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Buttons */
+.btn.secondary {
+  background: white;
+  color: #3498db;
+  border: 1px solid #3498db;
+  width: 100%;
+  margin-bottom: 4px;
+}
+
+.btn.secondary:hover:not(:disabled) {
+  background: #3498db;
+  color: white;
+}
+
+.btn.secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  color: #95a5a6;
+  border-color: #95a5a6;
+}
+
+/* Help Text */
+.help-text {
+  font-size: 12px;
+  color: #888;
+  margin-top: 4px;
+  margin-bottom: 12px;
+}
+
+/* Slider */
+.slider {
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: #ddd;
+  outline: none;
+  -webkit-appearance: none;
+  margin: 8px 0;
+}
+
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #3498db;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.slider::-webkit-slider-thumb:hover {
+  background: #2980b9;
+}
+
+.slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #3498db;
+  cursor: pointer;
+  border: none;
+  transition: background 0.2s;
+}
+
+.slider::-moz-range-thumb:hover {
+  background: #2980b9;
+}
+
+/* Keyboard Shortcuts */
+.keyboard-shortcuts {
+  margin-top: 12px;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  background: white;
+  overflow: hidden;
+}
+
+.keyboard-shortcuts summary {
+  padding: 10px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: #666;
+  user-select: none;
+  list-style: none;
+}
+
+.keyboard-shortcuts summary::-webkit-details-marker {
+  display: none;
+}
+
+.keyboard-shortcuts summary::before {
+  content: '▸ ';
+  display: inline-block;
+  transition: transform 0.2s;
+}
+
+.keyboard-shortcuts[open] summary::before {
+  transform: rotate(90deg);
+}
+
+.keyboard-shortcuts summary:hover {
+  background: #f8f9fa;
+}
+
+.keyboard-shortcuts ul {
+  padding: 12px;
+  margin: 0;
+  list-style: none;
+  border-top: 1px solid #e0e0e0;
+}
+
+.keyboard-shortcuts li {
+  padding: 6px 0;
+  font-size: 13px;
+  color: #555;
+}
+
+.keyboard-shortcuts kbd {
+  display: inline-block;
+  padding: 2px 6px;
+  background: #f5f5f5;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  color: #333;
+  box-shadow: 0 1px 1px rgba(0,0,0,0.1);
+}
