@@ -281,7 +281,7 @@ async function useSummarizationAPI(text, signal, url) {
       
       let fullSummary = '';
       let lastBroadcast = 0;
-      const BROADCAST_INTERVAL = 150;
+      const BROADCAST_INTERVAL = 50; // 20 FPS (was 150ms = 6.67 FPS)
       
       // Store the videoId for this specific stream at the start
       const videoIdForThisStream = url.includes('watch?v=') ? new URL(url).searchParams.get('v') : null;
@@ -446,7 +446,7 @@ async function usePromptAPI(text, signal, url) {
       
       let fullSummary = '';
       let lastBroadcast = 0;
-      const BROADCAST_INTERVAL = 150;
+      const BROADCAST_INTERVAL = 50; // 20 FPS (was 150ms = 6.67 FPS)
       
       // Store the videoId for this specific stream at the start
       const videoIdForThisStream = url.includes('watch?v=') ? new URL(url).searchParams.get('v') : null;
