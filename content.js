@@ -65,7 +65,17 @@
   
   // Create tooltip
   function createTooltip() {
-    if (tooltip) return tooltip;
+    // If tooltip exists but doesn't have the content wrapper, recreate it
+    if (tooltip && tooltipContent && tooltipContent.parentNode === tooltip) {
+      return tooltip;
+    }
+
+    // Remove old tooltip if it exists (for clean recreation)
+    if (tooltip && tooltip.parentNode) {
+      tooltip.parentNode.removeChild(tooltip);
+      tooltip = null;
+      tooltipContent = null;
+    }
     
     // Inject CSS for tooltip list styling and close button
     if (!document.getElementById('hover-tooltip-styles')) {
