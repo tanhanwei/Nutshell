@@ -21,6 +21,7 @@
   let dwellThreshold = DEFAULT_DWELL_MS;
   let phase = 'ready';
   let tooltip = null;
+  let tooltipContent = null; // Content wrapper inside tooltip
   let currentJob = null;
   let dwellTarget = null;
   let dwellAccum = 0;
@@ -168,7 +169,7 @@
         background: #ffffff;
         border-radius: 12px;
         box-shadow: 0 12px 48px rgba(15, 18, 32, 0.22);
-        padding: 16px;
+        padding: 16px 40px 16px 16px;
         max-width: 420px;
         max-height: 520px;
         overflow-y: auto;
@@ -199,20 +200,78 @@
       }
       #${TOOLTIP_ID} strong { font-weight: 600; }
       #${TOOLTIP_ID} em { font-style: italic; }
+      .gaze-tooltip-close-btn {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        background: rgba(0, 0, 0, 0.05);
+        border: none;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+        line-height: 1;
+        color: #666;
+        transition: all 0.2s ease;
+        padding: 0;
+        z-index: 1;
+      }
+      .gaze-tooltip-close-btn:hover {
+        background: rgba(0, 0, 0, 0.1);
+        color: #333;
+        transform: scale(1.1);
+      }
     `;
     document.head.appendChild(style);
   }
 
   function ensureTooltip() {
-    if (tooltip) {
+    // If tooltip exists but doesn't have the content wrapper, recreate it
+    if (tooltip && tooltipContent && tooltipContent.parentNode === tooltip) {
       return tooltip;
     }
+
+    // Remove old tooltip if it exists (for clean recreation)
+    if (tooltip && tooltip.parentNode) {
+      tooltip.parentNode.removeChild(tooltip);
+      tooltip = null;
+      tooltipContent = null;
+    }
+
     ensureTooltipStyles();
     tooltip = document.createElement('div');
     tooltip.id = TOOLTIP_ID;
+
+    // Create content wrapper (so innerHTML changes don't remove close button)
+    tooltipContent = document.createElement('div');
+    tooltipContent.className = 'gaze-tooltip-content-wrapper';
+    tooltip.appendChild(tooltipContent);
+
+    // Add close button
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'gaze-tooltip-close-btn';
+    closeBtn.innerHTML = '×';
+    closeBtn.title = 'Close (or dwell to click)';
+    closeBtn.setAttribute('data-gaze-clickable', 'true'); // Make it work with gaze dwell
+    closeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      hideTooltip();
+      // Clear current job so tooltip doesn't reappear
+      if (currentJob) {
+        currentJob = null;
+      }
+    });
+    tooltip.appendChild(closeBtn);
+
     tooltip.addEventListener('mouseenter', () => {
       dwellAccum = 0;
     });
+
     document.body.appendChild(tooltip);
     return tooltip;
   }
@@ -223,7 +282,7 @@
       return;
     }
     const tip = ensureTooltip();
-    tip.innerHTML = html;
+    tooltipContent.innerHTML = html;
     tip.style.display = 'block';
     tip.style.opacity = '0';
     positionTooltip(link);
@@ -236,9 +295,9 @@
     if (!tooltip) return;
     tooltip.style.opacity = '0';
     setTimeout(() => {
-      if (tooltip) {
+      if (tooltip && tooltipContent) {
         tooltip.style.display = 'none';
-        tooltip.innerHTML = '';
+        tooltipContent.innerHTML = '';
       }
     }, 180);
   }
