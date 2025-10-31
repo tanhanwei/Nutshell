@@ -6,7 +6,7 @@
 let settings = {
   apiChoice: 'summarization',
   customPrompt: 'Summarize this article in 2-3 sentences',
-  displayMode: 'both',
+  displayMode: 'panel',
   gazeEnabled: false,
   gazeDwellMs: 600
 };

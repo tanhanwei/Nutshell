@@ -868,9 +868,10 @@
       }
     });
     window.addEventListener('gaze:calibration-started', () => {
-      // Hide tooltip during calibration
+      // Forcibly hide tooltip during calibration (both active and completed)
       cancelActiveJob('calibration_started');
-      console.debug('[GazeDwell] Tooltip hidden for calibration');
+      hideTooltip();
+      console.debug('[GazeDwell] Tooltip forcibly hidden for calibration');
     });
     window.addEventListener('gaze:calibration-stopped', () => {
       // Tooltip will naturally reappear when user looks at links

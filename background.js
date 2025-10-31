@@ -119,7 +119,7 @@ const apiInitializationPromise = initAPIs();
 let settings = {
   apiChoice: 'summarization',
   customPrompt: 'Summarize this article in 2-3 sentences',
-  displayMode: 'both'
+  displayMode: 'panel'
 };
 
 // Load settings from storage

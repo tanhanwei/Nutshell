@@ -47,7 +47,7 @@
   let currentTwitterTweetId = null;
   let pendingTwitterThreadId = null;
   let pendingTwitterStartedAt = 0;
-  let displayMode = 'both';
+  let displayMode = 'panel';
   let currentTooltipPlacement = 'auto';
   let currentYouTubeRequestToken = 0;
   let currentHoveredElement = null;
