@@ -6,7 +6,7 @@
 let settings = {
   apiChoice: 'summarization',
   customPrompt: 'Summarize this article in 2-3 sentences',
-  displayMode: 'panel',
+  displayMode: 'tooltip',
   gazeEnabled: false,
   gazeDwellMs: 600
 };
@@ -204,6 +204,18 @@ function setupEventListeners() {
     elements.gazeEnabled.addEventListener('change', async (e) => {
       settings.gazeEnabled = e.target.checked;
       saveSettings();
+
+      // Notify content script of the change
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs[0]) {
+          chrome.tabs.sendMessage(tabs[0].id, {
+            type: 'GAZE_ENABLED_CHANGED',
+            gazeEnabled: settings.gazeEnabled
+          }).catch(() => {
+            // Ignore if content script not loaded yet
+          });
+        }
+      });
 
       // Update calibrate button disabled state
       if (elements.calibrateBtn) {

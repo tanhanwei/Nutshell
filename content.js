@@ -47,7 +47,8 @@
   let currentTwitterTweetId = null;
   let pendingTwitterThreadId = null;
   let pendingTwitterStartedAt = 0;
-  let displayMode = 'panel';
+  let displayMode = 'tooltip';
+  let gazeEnabled = false;
   let currentTooltipPlacement = 'auto';
   let currentYouTubeRequestToken = 0;
   let currentHoveredElement = null;
@@ -65,7 +66,7 @@
   function createTooltip() {
     if (tooltip) return tooltip;
     
-    // Inject CSS for tooltip list styling
+    // Inject CSS for tooltip list styling and close button
     if (!document.getElementById('hover-tooltip-styles')) {
       const style = document.createElement('style');
       style.id = 'hover-tooltip-styles';
@@ -86,6 +87,35 @@
         }
         #hover-summary-tooltip em {
           font-style: italic;
+        }
+        .tooltip-close-btn {
+          position: absolute;
+          top: 8px;
+          right: 8px;
+          width: 24px;
+          height: 24px;
+          border-radius: 50%;
+          background: rgba(0, 0, 0, 0.05);
+          border: none;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 16px;
+          line-height: 1;
+          color: #666;
+          transition: all 0.2s ease;
+          padding: 0;
+          z-index: 1;
+        }
+        .tooltip-close-btn:hover {
+          background: rgba(0, 0, 0, 0.1);
+          color: #333;
+          transform: scale(1.1);
+        }
+        #hover-summary-tooltip {
+          position: relative;
+          padding-right: 40px !important; /* Make room for close button */
         }
       `;
       document.head.appendChild(style);
@@ -127,7 +157,19 @@
       isMouseInTooltip = false;
       scheduleHide(200); // Short delay when leaving tooltip
     });
-    
+
+    // Add close button
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'tooltip-close-btn';
+    closeBtn.innerHTML = '×';
+    closeBtn.title = 'Close';
+    closeBtn.setAttribute('data-gaze-clickable', 'true'); // Make it work with gaze dwell
+    closeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      hideTooltip();
+    });
+    tooltip.appendChild(closeBtn);
+
     document.body.appendChild(tooltip);
     return tooltip;
   }
@@ -1156,6 +1198,11 @@
   
   // Handle mouseover
   function handleMouseOver(e) {
+    // Skip mouse hover if head tracking is enabled
+    if (gazeEnabled) {
+      return;
+    }
+
     const link = findLink(e.target);
     if (!link) {
       if (IS_TWITTER) {
@@ -1824,6 +1871,11 @@
       }
     }
 
+    if (message.type === 'GAZE_ENABLED_CHANGED') {
+      gazeEnabled = message.gazeEnabled;
+      debugLog('[Content] Gaze enabled updated:', gazeEnabled);
+    }
+
     if (message.type === 'TRIGGER_CALIBRATION') {
       debugLog('[Content] Triggering head calibration');
       // Trigger Alt+H keyboard event to start calibration
@@ -1857,11 +1909,15 @@
     }
   });
   
-  // Get initial display mode
-  chrome.storage.local.get(['displayMode'], (result) => {
+  // Get initial display mode and gaze enabled status
+  chrome.storage.local.get(['displayMode', 'gazeEnabled'], (result) => {
     if (result.displayMode) {
       displayMode = result.displayMode;
       debugLog('[Content] Initial display mode:', displayMode);
+    }
+    if (typeof result.gazeEnabled === 'boolean') {
+      gazeEnabled = result.gazeEnabled;
+      debugLog('[Content] Initial gaze enabled:', gazeEnabled);
     }
   });
   

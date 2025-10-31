@@ -754,13 +754,14 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
       window.__lastHeadFrame = null;
     }
 
-    if (Array.isArray(face.mesh)) {
-      if (!earCal) {
-        ensureEarCalibration(face.mesh, ts);
-      } else {
-        updateBlinkState(face.mesh, ts);
-      }
-    }
+    // Blink detection disabled - was causing issues and not accurate enough
+    // if (Array.isArray(face.mesh)) {
+    //   if (!earCal) {
+    //     ensureEarCalibration(face.mesh, ts);
+    //   } else {
+    //     updateBlinkState(face.mesh, ts);
+    //   }
+    // }
 
     if (!probePrinted) {
       probeFace(face);
