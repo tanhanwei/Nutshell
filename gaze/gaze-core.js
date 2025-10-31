@@ -1070,6 +1070,16 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
       video.parentElement.removeChild(video);
       video = null;
     }
+
+    // Reset initialization state so re-enabling works properly
+    initializationPromise = null;
+    human = null;
+    detectInProgress = false;
+
+    // Reset detection tracking
+    framesSkipped = 0;
+    detectDurations = [];
+    probePrinted = false;
   }
 
   function handleStorageChange(changes, areaName) {
