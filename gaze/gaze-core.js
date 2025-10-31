@@ -71,7 +71,7 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
   let earClosedStart = null;
   let blinkClosedAt = null;
   let blinkHoldEmitted = false;
-  let previewSkipToggle = false;
+  let previewFrameCount = 0;
 
   let gazeEnabled = false;
   if (typeof window.__gazeHeadMode !== 'boolean') {
@@ -529,7 +529,7 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
         filter: {
           enabled: true,
           equalization: true,
-          temporalSmoothing: 0.9
+          temporalSmoothing: 0.3
         }
       });
 
@@ -673,8 +673,10 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
 
     window.__lastFace = face;
 
-    const yawDeg = Number(face.rotation && face.rotation.angle ? face.rotation.angle.yaw : 0);
-    const pitchDeg = Number(face.rotation && face.rotation.angle ? face.rotation.angle.pitch : 0);
+    const yawRad = Number(face.rotation && face.rotation.angle ? face.rotation.angle.yaw : 0);
+    const pitchRad = Number(face.rotation && face.rotation.angle ? face.rotation.angle.pitch : 0);
+    const yawDeg = yawRad * (180 / Math.PI);
+    const pitchDeg = pitchRad * (180 / Math.PI);
 
     let headFrame = null;
     try {
@@ -688,9 +690,9 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
     }
     if (headFrame) {
       headFrameErrorLogged = false;
-      window.__lastHeadFrame = { nx: headFrame.nx, ny: headFrame.ny, yaw: yawDeg, pitch: pitchDeg };
+      window.__lastHeadFrame = { nx: headFrame.nx, ny: headFrame.ny, yawDeg, pitchDeg };
       window.dispatchEvent(new CustomEvent('head:frame', {
-        detail: { nx: headFrame.nx, ny: headFrame.ny, yaw: yawDeg, pitch: pitchDeg, ts }
+        detail: { nx: headFrame.nx, ny: headFrame.ny, yawDeg, pitchDeg, ts }
       }));
     } else {
       window.__lastHeadFrame = null;
@@ -755,7 +757,7 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
 
         let normX = offsetNx < 0 ? offsetNx / leftRange : offsetNx / rightRange;
         const normYTrans = offsetNy < 0 ? offsetNy / upRange : offsetNy / downRange;
-        let normY = (-pitchDeg / HEAD_PITCH_SCALE) + normYTrans * 0.35;
+        let normY = (pitchDeg / HEAD_PITCH_SCALE) + normYTrans * 0.35;
 
         const translationRatioX = Math.abs(offsetNx) / (offsetNx < 0 ? leftRange : rightRange);
         const translationRatioY = Math.abs(offsetNy) / (offsetNy < 0 ? upRange : downRange);
@@ -764,11 +766,11 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
           normX += yawNorm * HEAD_ROTATION_INFLUENCE * (1 - Math.min(1, Math.abs(normX)));
         }
         if (Math.abs(normY) < 1) {
-          normY += (-pitchNorm) * (HEAD_ROTATION_INFLUENCE * 0.6) * (1 - Math.min(1, Math.abs(normY)));
+          normY += pitchNorm * (HEAD_ROTATION_INFLUENCE * 0.6) * (1 - Math.min(1, Math.abs(normY)));
         }
 
         if (Math.abs(normY) > HEAD_EDGE_THRESHOLD && translationRatioY < TRANSLATION_MIN_RATIO && Math.abs(pitchNorm) > PITCH_FALLBACK_THRESHOLD) {
-          const edgeBlend = HEAD_ROTATION_EDGE_GAIN * Math.sign(-pitchNorm);
+          const edgeBlend = HEAD_ROTATION_EDGE_GAIN * Math.sign(pitchNorm);
           normY = Math.max(-1.4, Math.min(1.4, normY + edgeBlend));
         }
 
@@ -902,8 +904,8 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
     if (!canvas || canvas.style.display !== 'block') {
       return;
     }
-    previewSkipToggle = !previewSkipToggle;
-    if (previewSkipToggle) {
+    previewFrameCount++;
+    if (previewFrameCount % 10 !== 0) {
       return;
     }
     const ctx = canvas.getContext('2d');
@@ -925,108 +927,59 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
     if (!face) {
       return;
     }
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = 'rgba(0,255,255,0.8)';
-    ctx.fillStyle = 'rgba(255,255,0,0.9)';
 
+    // Draw face box
     if (face.box) {
       const box = face.box;
       const x = Math.max(0, Math.min(vw, box[0]));
       const y = Math.max(0, Math.min(vh, box[1]));
       const w = Math.max(1, box[2]);
       const h = Math.max(1, box[3]);
-      ctx.strokeStyle = 'rgba(0,255,180,0.6)';
-      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(0,255,180,0.5)';
+      ctx.lineWidth = 1.5;
       ctx.strokeRect(vw - x - w, y, w, h);
-      ctx.beginPath();
-      ctx.moveTo(vw - (x + w / 2), y);
-      ctx.lineTo(vw - (x + w / 2), y + h);
-      ctx.moveTo(vw - x, y + h / 2);
-      ctx.lineTo(vw - (x + w), y + h / 2);
-      ctx.stroke();
     }
 
-    if (Array.isArray(face.mesh) && face.mesh.length) {
-      ctx.strokeStyle = 'rgba(0,140,255,0.35)';
-      ctx.lineWidth = 1;
-      const indices = [33, 133, 362, 263, 1, 4, 5, 197];
-      const pathPts = [];
-      indices.forEach((idx) => {
-        const pt = pick(face.mesh, idx);
-        if (pt) {
-          let px = pt[0];
-          let py = pt[1];
-          if (Math.abs(px) <= 1 && Math.abs(py) <= 1) {
-            px = (px + 0.5) * vw;
-            py = (py + 0.5) * vh;
-          }
-          pathPts.push([px, py]);
+    // Draw head tracking points
+    const headFrame = window.__lastHeadFrame;
+    if (headFrame && Array.isArray(face.mesh) && face.mesh.length) {
+      // Get eye centers
+      const leftEye = resolvePoint(face.mesh, face.annotations, LEFT_EYE_CANDIDATES, ['leftEyeUpper0', 'leftEyeLower0']);
+      const rightEye = resolvePoint(face.mesh, face.annotations, RIGHT_EYE_CANDIDATES, ['rightEyeUpper0', 'rightEyeLower0']);
+      const nose = resolvePoint(face.mesh, face.annotations, NOSE_CANDIDATES, ['noseTip']);
+
+      const drawPoint = (pt, color, radius) => {
+        if (!pt) return;
+        let px = pt[0];
+        let py = pt[1];
+        if (Math.abs(px) <= 1 && Math.abs(py) <= 1) {
+          px = (px + 0.5) * vw;
+          py = (py + 0.5) * vh;
         }
-      });
-      if (pathPts.length >= 3) {
-        ctx.beginPath();
-        pathPts.forEach((p, idx) => {
-          const mirroredX = vw - p[0];
-          if (idx === 0) {
-            ctx.moveTo(mirroredX, p[1]);
-          } else {
-            ctx.lineTo(mirroredX, p[1]);
-          }
-        });
-        ctx.closePath();
-        ctx.stroke();
-      }
-    }
-
-    const points = [];
-    const annotations = face.annotations || {};
-    const pushAnnotationPoints = (arr) => {
-      if (!Array.isArray(arr)) return;
-      for (let i = 0; i < arr.length; i += 1) {
-        const norm = normalizePoint(arr[i]);
-        if (norm) {
-          points.push(norm);
+        if (Number.isFinite(px) && Number.isFinite(py)) {
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.arc(vw - px, py, radius, 0, Math.PI * 2);
+          ctx.fill();
         }
-      }
-    };
-    pushAnnotationPoints(annotations.leftEyeIris);
-    pushAnnotationPoints(annotations.rightEyeIris);
+      };
 
-    if (!points.length && face.iris) {
-      const leftIris = Array.isArray(face.iris.left) ? face.iris.left : face.iris[0];
-      const rightIris = Array.isArray(face.iris.right) ? face.iris.right : face.iris[1];
-      pushAnnotationPoints(leftIris);
-      pushAnnotationPoints(rightIris);
+      // Draw landmarks
+      drawPoint(leftEye, 'rgba(0,150,255,0.8)', 4);
+      drawPoint(rightEye, 'rgba(0,150,255,0.8)', 4);
+      drawPoint(nose, 'rgba(0,255,100,0.9)', 5);
+
+      // Draw debug text
+      ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      ctx.font = 'bold 16px monospace';
+      ctx.shadowColor = 'rgba(0,0,0,0.8)';
+      ctx.shadowBlur = 4;
+      const yawDeg = headFrame.yawDeg || 0;
+      const pitchDeg = headFrame.pitchDeg || 0;
+      ctx.fillText(`Yaw: ${yawDeg.toFixed(1)}°`, 10, 24);
+      ctx.fillText(`Pitch: ${pitchDeg.toFixed(1)}°`, 10, 48);
+      ctx.shadowBlur = 0;
     }
-
-    if (!points.length && Array.isArray(face.mesh) && face.mesh.length) {
-      const irisIndices = [468, 469, 470, 471, 472, 473, 474, 475, 476, 477];
-      for (let i = 0; i < irisIndices.length; i += 1) {
-        const pt = pick(face.mesh, irisIndices[i]);
-        if (pt) {
-          points.push(pt);
-        }
-      }
-    }
-
-    points.forEach((point) => {
-      const norm = normalizePoint(point);
-      if (!norm) {
-        return;
-      }
-      let px = norm[0];
-      let py = norm[1];
-      if (Math.abs(px) <= 1 && Math.abs(py) <= 1) {
-        px = (px + 0.5) * vw;
-        py = (py + 0.5) * vh;
-      }
-      if (!Number.isFinite(px) || !Number.isFinite(py)) {
-        return;
-      }
-      ctx.beginPath();
-      ctx.arc(vw - px, py, 2.2, 0, Math.PI * 2);
-      ctx.fill();
-    });
   }
 
   function probeFace(face) {

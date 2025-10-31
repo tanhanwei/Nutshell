@@ -9,11 +9,13 @@
   const DEFAULT_DWELL_MS = 600;
   const RECENT_WINDOW_MS = 20000;
   const MAX_RECENT_ENTRIES = 32;
-  const EDGE_PAD_PX = 64;
-  const EDGE_HOLD_MS = 800;
+  const EDGE_PAD_PX = 180;
+  const EDGE_HOLD_MS = 400;
   const MAX_LINK_SCAN = 500;
-  const DEADZONE_PX = 6;
-  const STICKY_RADIUS_PX = 28;
+  const DEADZONE_PX = 12;
+  const STICKY_RADIUS_PX = 45;
+  const SCROLL_ZONE_ID = 'gaze-scroll-zones';
+  const DWELL_INDICATOR_ID = 'gaze-dwell-indicator';
 
   let gazeEnabled = false;
   let dwellThreshold = DEFAULT_DWELL_MS;
@@ -32,6 +34,8 @@
   let effectiveY = null;
   let snappedLink = null;
   let lastSnapLink = null;
+  let scrollZones = null;
+  let dwellIndicator = null;
   const edgeHold = {
     top: 0,
     bottom: 0,
@@ -40,6 +44,111 @@
   };
 
   const processingMessage = '<div style="opacity:0.6;font-style:italic;">Generating summary...</div>';
+
+  function ensureScrollZones() {
+    if (scrollZones) {
+      return scrollZones;
+    }
+    scrollZones = document.createElement('div');
+    scrollZones.id = SCROLL_ZONE_ID;
+    scrollZones.style.cssText = `
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 2147483645;
+    `;
+
+    const topZone = document.createElement('div');
+    topZone.id = 'gaze-scroll-top';
+    topZone.style.cssText = `
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: ${EDGE_PAD_PX}px;
+      background: linear-gradient(180deg, rgba(59, 130, 246, 0.15) 0%, rgba(59, 130, 246, 0) 100%);
+      border-bottom: 1px solid rgba(59, 130, 246, 0.3);
+      opacity: 0;
+      transition: opacity 0.2s ease;
+    `;
+
+    const bottomZone = document.createElement('div');
+    bottomZone.id = 'gaze-scroll-bottom';
+    bottomZone.style.cssText = `
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: ${EDGE_PAD_PX}px;
+      background: linear-gradient(0deg, rgba(34, 197, 94, 0.15) 0%, rgba(34, 197, 94, 0) 100%);
+      border-top: 1px solid rgba(34, 197, 94, 0.3);
+      opacity: 0;
+      transition: opacity 0.2s ease;
+    `;
+
+    scrollZones.appendChild(topZone);
+    scrollZones.appendChild(bottomZone);
+    document.body.appendChild(scrollZones);
+    return scrollZones;
+  }
+
+  function updateScrollZoneVisibility(topIntensity, bottomIntensity) {
+    if (!scrollZones) return;
+    const topZone = document.getElementById('gaze-scroll-top');
+    const bottomZone = document.getElementById('gaze-scroll-bottom');
+    if (topZone) {
+      topZone.style.opacity = topIntensity > 0.5 ? String(Math.min(1, topIntensity)) : '0';
+    }
+    if (bottomZone) {
+      bottomZone.style.opacity = bottomIntensity > 0.5 ? String(Math.min(1, bottomIntensity)) : '0';
+    }
+  }
+
+  function ensureDwellIndicator() {
+    if (dwellIndicator) {
+      return dwellIndicator;
+    }
+    dwellIndicator = document.createElement('div');
+    dwellIndicator.id = DWELL_INDICATOR_ID;
+    dwellIndicator.style.cssText = `
+      position: fixed;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: rgba(59, 130, 246, 0.8);
+      box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.6);
+      pointer-events: none;
+      z-index: 2147483646;
+      display: none;
+      transition: box-shadow 0.1s ease-out;
+    `;
+    document.body.appendChild(dwellIndicator);
+    return dwellIndicator;
+  }
+
+  function updateDwellIndicator(link, progress) {
+    const indicator = ensureDwellIndicator();
+    if (!link || progress <= 0) {
+      indicator.style.display = 'none';
+      return;
+    }
+    const rect = link.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+
+    indicator.style.display = 'block';
+    indicator.style.left = `${centerX - 4}px`;
+    indicator.style.top = `${centerY - 4}px`;
+
+    const ringSize = Math.round(progress * 20);
+    indicator.style.boxShadow = `0 0 0 ${ringSize}px rgba(59, 130, 246, ${0.4 * (1 - progress)})`;
+  }
+
+  function hideDwellIndicator() {
+    if (dwellIndicator) {
+      dwellIndicator.style.display = 'none';
+    }
+  }
 
   function ensureTooltipStyles() {
     if (document.getElementById(TOOLTIP_STYLE_ID)) {
@@ -281,7 +390,7 @@
 
     for (const key of Object.keys(intents)) {
       const intensity = intents[key];
-      if (intensity > 0.9) {
+      if (intensity > 0.65) {
         if (!edgeHold[key]) {
           edgeHold[key] = now;
         } else if (now - edgeHold[key] > EDGE_HOLD_MS) {
@@ -298,6 +407,8 @@
         edgeHold[key] = 0;
       }
     }
+
+    updateScrollZoneVisibility(topIntensity, bottomIntensity);
   }
 
   function synthClick(target, button = 0) {
@@ -384,15 +495,21 @@
     if (link !== dwellTarget) {
       dwellTarget = link;
       dwellAccum = 0;
+      hideDwellIndicator();
     }
 
     if (!link) {
+      hideDwellIndicator();
       return;
     }
 
     dwellAccum += delta;
+    const progress = Math.min(1, dwellAccum / dwellThreshold);
+    updateDwellIndicator(link, progress);
+
     if (dwellAccum >= dwellThreshold) {
       dwellAccum = 0;
+      hideDwellIndicator();
       triggerSummary(link);
     }
   }
@@ -741,6 +858,7 @@
 
   function init() {
     ensureTooltipStyles();
+    ensureScrollZones();
     window.addEventListener(POINT_EVENT, handlePointEvent);
     window.addEventListener(STATUS_EVENT, (event) => {
       const detail = event.detail || {};
