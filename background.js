@@ -1845,4 +1845,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     
     return true; // Keep channel open for async response
   }
+
+  // Relay gaze status to sidepanel
+  if (message.type === 'GAZE_STATUS') {
+    // Forward to all extension views (including sidepanel)
+    chrome.runtime.sendMessage({
+      type: 'GAZE_STATUS',
+      phase: message.phase,
+      note: message.note
+    }).catch(() => {
+      // Ignore errors if no receivers
+    });
+  }
 });

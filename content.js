@@ -1823,6 +1823,32 @@
         hideTooltip();
       }
     }
+
+    if (message.type === 'TRIGGER_CALIBRATION') {
+      debugLog('[Content] Triggering head calibration');
+      // Trigger Alt+H keyboard event to start calibration
+      const event = new KeyboardEvent('keydown', {
+        key: 'h',
+        code: 'KeyH',
+        altKey: true,
+        bubbles: true,
+        cancelable: true
+      });
+      document.dispatchEvent(event);
+    }
+  });
+
+  // Listen for gaze:status events and relay to sidepanel
+  window.addEventListener('gaze:status', (event) => {
+    if (event.detail) {
+      chrome.runtime.sendMessage({
+        type: 'GAZE_STATUS',
+        phase: event.detail.phase,
+        note: event.detail.note
+      }).catch(() => {
+        // Ignore errors if sidepanel not open
+      });
+    }
   });
   
   // Get initial display mode
