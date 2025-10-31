@@ -31,7 +31,9 @@
   let titleEl = null;
   let hintEl = null;
   let footerEl = null;
+  let beginBtn = null;
   let active = false;
+  let waitingToStart = false;
   let capturing = false;
   let stepIndex = 0;
   let stepSamples = [];
@@ -79,11 +81,41 @@
     titleEl.style.cssText = 'font-size: 22px; font-weight: 700; margin-bottom: 16px; color: #1a1a1a; letter-spacing: -0.02em;';
     hintEl = document.createElement('div');
     hintEl.style.cssText = 'font-size: 16px; opacity: 0.75; margin-bottom: 20px; color: #333; line-height: 1.5;';
+
+    beginBtn = document.createElement('button');
+    beginBtn.textContent = 'Click Here to Begin';
+    beginBtn.style.cssText = `
+      padding: 14px 32px;
+      font-size: 16px;
+      font-weight: 600;
+      color: white;
+      background: #3498db;
+      border: none;
+      border-radius: 12px;
+      cursor: pointer;
+      margin-bottom: 20px;
+      display: none;
+      transition: all 0.2s;
+      box-shadow: 0 4px 12px rgba(52, 152, 219, 0.3);
+    `;
+    beginBtn.onmouseover = () => {
+      beginBtn.style.background = '#2980b9';
+      beginBtn.style.transform = 'translateY(-2px)';
+      beginBtn.style.boxShadow = '0 6px 16px rgba(52, 152, 219, 0.4)';
+    };
+    beginBtn.onmouseout = () => {
+      beginBtn.style.background = '#3498db';
+      beginBtn.style.transform = 'translateY(0)';
+      beginBtn.style.boxShadow = '0 4px 12px rgba(52, 152, 219, 0.3)';
+    };
+    beginBtn.onclick = handleBeginClick;
+
     footerEl = document.createElement('div');
     footerEl.style.cssText = 'font-size: 13px; opacity: 0.5; color: #666;';
 
     panel.appendChild(titleEl);
     panel.appendChild(hintEl);
+    panel.appendChild(beginBtn);
     panel.appendChild(footerEl);
     ui.appendChild(panel);
     document.documentElement.appendChild(ui);
@@ -95,11 +127,38 @@
     ui.style.display = visible ? 'flex' : 'none';
   }
 
-  function updateUI(message, hint, footer) {
+  function updateUI(message, hint, footer, showButton = false) {
     ensureUI();
     titleEl.textContent = message;
     hintEl.textContent = hint || '';
     footerEl.textContent = footer || 'Space or long blink (≥1s) to confirm · Esc to cancel';
+
+    if (showButton) {
+      beginBtn.style.display = 'inline-block';
+      footerEl.textContent = 'Press Esc to cancel';
+    } else {
+      beginBtn.style.display = 'none';
+    }
+  }
+
+  function handleBeginClick() {
+    waitingToStart = false;
+    beginActualCalibration();
+  }
+
+  function beginActualCalibration() {
+    stepIndex = 0;
+    updateUI(`Step 1 / ${STEPS.length}: ${STEPS[0].label}`, STEPS[0].hint);
+    const centerX = Math.round((window.innerWidth || 1) / 2);
+    const centerY = Math.round((window.innerHeight || 1) / 2);
+    window.dispatchEvent(new CustomEvent('gaze:status', {
+      detail: { phase: 'calibrating', note: 'center' }
+    }));
+    const now = performance.now();
+    window.dispatchEvent(new CustomEvent('gaze:point', {
+      detail: { x: centerX, y: centerY, conf: 0.95, ts: now }
+    }));
+    console.log('[HeadCal] Calibration steps started');
   }
 
   function stopCapture() {
@@ -125,6 +184,7 @@
   function startCalibration() {
     if (active) return;
     active = true;
+    waitingToStart = true;
     window.__gazeHeadCalActive = true;
     stepIndex = 0;
     calibration = {
@@ -140,22 +200,19 @@
     resetSamples();
     poseAverages = new Array(STEPS.length);
     setUIVisible(true);
-    updateUI(`Step 1 / ${STEPS.length}: ${STEPS[0].label}`, STEPS[0].hint);
-    const centerX = Math.round((window.innerWidth || 1) / 2);
-    const centerY = Math.round((window.innerHeight || 1) / 2);
-    window.dispatchEvent(new CustomEvent('gaze:status', {
-      detail: { phase: 'calibrating', note: 'center' }
-    }));
-    const now = performance.now();
-    window.dispatchEvent(new CustomEvent('gaze:point', {
-      detail: { x: centerX, y: centerY, conf: 0.95, ts: now }
-    }));
-    console.log('[HeadCal] Started');
+    updateUI(
+      'Head Tracking Calibration',
+      'You\'ll be asked to look in 5 different directions. Click the button below to begin.',
+      'Press Esc to cancel',
+      true  // Show button
+    );
+    console.log('[HeadCal] Waiting for user to click begin');
   }
 
   function stopCalibration(message) {
     if (!active) return;
     active = false;
+    waitingToStart = false;
     window.__gazeHeadCalActive = false;
     stopCapture();
     setUIVisible(false);
@@ -371,6 +428,8 @@
     if (!active) return;
     if (event.key === ' ') {
       event.preventDefault();
+      // Ignore SPACE when waiting for user to click begin button
+      if (waitingToStart) return;
       confirmStep().catch((error) => console.warn('[HeadCal] capture failed:', error));
     }
     if (event.key === 'Escape') {

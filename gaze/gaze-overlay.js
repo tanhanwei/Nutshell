@@ -38,13 +38,17 @@
     if (changes.gazeEnabled) {
       const enabled = Boolean(changes.gazeEnabled.newValue);
       if (!enabled) {
-        // Hide UI when disabled
+        // Hide UI when disabled and reset state
+        hasPointerPosition = false;
+        fpsEMA = 0;
+        lastConfidence = null;
         setPointerVisible(false);
         setPreviewVisible(false);
       } else {
         // Show UI when re-enabled
         setPreviewVisible(true);
-        setPointerVisible(true);
+        // Pointer will show automatically when first point arrives
+        pointerVisible = true;
       }
     }
   }

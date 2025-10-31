@@ -210,9 +210,11 @@ function setupEventListeners() {
         elements.calibrateBtn.disabled = !settings.gazeEnabled;
       }
 
-      // Update status text
+      // Update status text immediately to prevent race conditions
       if (!settings.gazeEnabled) {
-        updateGazeStatus('ready', 'Enable to start');
+        updateGazeStatus('ready', 'Disabled');
+      } else {
+        updateGazeStatus('loading', 'Initializing...');
       }
 
       console.log('[Sidepanel] Gaze tracking toggled:', settings.gazeEnabled);
