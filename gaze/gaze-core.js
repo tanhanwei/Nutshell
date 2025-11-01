@@ -10,10 +10,10 @@
   const HUMAN_MODULE_PATH = 'gaze/human/human.esm.js';
   const HUMAN_MODELS_DIR = 'gaze/human/models/';
   const POINT_THROTTLE_MS = 33;
-  const HEAD_FILTER_MIN_CUTOFF = 0.8;
+  const HEAD_FILTER_MIN_CUTOFF = 0.4;     // Reduced from 0.8 for more smoothing
   const HEAD_FILTER_BETA = 0.0025;
   const HEAD_FILTER_D_CUTOFF = 1.0;
-  const HEAD_POINTER_LERP = 0.2;
+  const HEAD_POINTER_LERP = 0.12;         // Reduced from 0.2 for more smoothing
   const HEAD_TRANSLATION_GAIN = 1;
   const HEAD_ROTATION_INFLUENCE = 0.22;
   const HEAD_ROTATION_EDGE_GAIN = 0.35;
@@ -531,8 +531,8 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
         },
         filter: {
           enabled: true,
-          equalization: true,
-          temporalSmoothing: 0.3
+          equalization: false,        // Disabled for better FPS (adds 10-20ms)
+          temporalSmoothing: 0.5      // Increased from 0.3 for more stability
         }
       });
 
@@ -583,8 +583,8 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
       stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: 'user',
-          width: { ideal: 640 },
-          height: { ideal: 480 },
+          width: { ideal: 320 },
+          height: { ideal: 240 },
           frameRate: { ideal: 30, max: 30 }
         },
         audio: false
@@ -624,6 +624,13 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
           videoFrameHandle = nextVideo.requestVideoFrameCallback(onFrame);
         } else {
           videoFrameHandle = null;
+        }
+
+        // Draw preview EVERY FRAME (not every 10th detection)
+        // This gives smooth 30fps preview instead of 0.8fps
+        previewFrameCount++;
+        if (previewFrameCount % 3 === 0) {
+          drawPreview(window.__lastFace || null);
         }
 
         // Skip this frame if previous detection still in progress
@@ -674,6 +681,12 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
           rafHandle = null;
         }
 
+        // Draw preview EVERY FRAME (not every 10th detection)
+        previewFrameCount++;
+        if (previewFrameCount % 3 === 0) {
+          drawPreview(window.__lastFace || null);
+        }
+
         // Skip this frame if previous detection still in progress
         if (detectInProgress) {
           framesSkipped++;
@@ -715,7 +728,7 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
   function processDetection(result, ts) {
     const face = result && result.face && result.face[0] ? result.face[0] : null;
 
-    drawPreview(face);
+    // Preview now drawn in frame callback for smooth 10fps (not here at 0.8fps)
 
     if (!face) {
       headFilterX = null;
@@ -734,6 +747,17 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
     const yawDeg = yawRad * (180 / Math.PI);
     const pitchDeg = pitchRad * (180 / Math.PI);
 
+    // Debug: Log rotation data once to check if it's being populated
+    if (!window.__rotationLogged) {
+      console.debug('[GazeCore] Rotation data:', {
+        hasRotation: !!face.rotation,
+        hasAngle: !!(face.rotation && face.rotation.angle),
+        yawRad, pitchRad, yawDeg, pitchDeg,
+        fullRotation: face.rotation
+      });
+      window.__rotationLogged = true;
+    }
+
     let headFrame = null;
     try {
       headFrame = computeHeadFrame(face);
@@ -744,6 +768,8 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
       }
       headFrame = null;
     }
+
+    // Always store yawDeg/pitchDeg for preview display, even if headFrame computation fails
     if (headFrame) {
       headFrameErrorLogged = false;
       window.__lastHeadFrame = { nx: headFrame.nx, ny: headFrame.ny, yawDeg, pitchDeg };
@@ -751,7 +777,8 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
         detail: { nx: headFrame.nx, ny: headFrame.ny, yawDeg, pitchDeg, ts }
       }));
     } else {
-      window.__lastHeadFrame = null;
+      // Still store rotation data for preview, just no position data
+      window.__lastHeadFrame = { nx: 0, ny: 0, yawDeg, pitchDeg };
     }
 
     // Blink detection disabled - was causing issues and not accurate enough
@@ -961,10 +988,8 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
     if (!canvas || canvas.style.display !== 'block') {
       return;
     }
-    previewFrameCount++;
-    if (previewFrameCount % 10 !== 0) {
-      return;
-    }
+    // Throttling now done in frame callback (every 3rd frame)
+    // No need to throttle here anymore
     const ctx = canvas.getContext('2d');
     if (!ctx || !video) {
       return;
@@ -1026,13 +1051,38 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
       drawPoint(rightEye, 'rgba(0,150,255,0.8)', 4);
       drawPoint(nose, 'rgba(0,255,100,0.9)', 5);
 
-      // Draw debug text
+      // Draw debug text with rotation angles
       ctx.fillStyle = 'rgba(255,255,255,0.95)';
       ctx.font = 'bold 16px monospace';
       ctx.shadowColor = 'rgba(0,0,0,0.8)';
       ctx.shadowBlur = 4;
-      const yawDeg = headFrame.yawDeg || 0;
-      const pitchDeg = headFrame.pitchDeg || 0;
+      // headFrame is window.__lastHeadFrame from line 1026
+
+      // Debug: Log what we're trying to display (only once)
+      if (!window.__displayDebugLogged) {
+        console.debug('[GazeCore] Preview display data:', {
+          headFrame,
+          hasYaw: 'yawDeg' in (headFrame || {}),
+          hasPitch: 'pitchDeg' in (headFrame || {}),
+          yawValue: headFrame?.yawDeg,
+          pitchValue: headFrame?.pitchDeg
+        });
+        window.__displayDebugLogged = true;
+      }
+
+      const yawDeg = (headFrame && typeof headFrame.yawDeg === 'number') ? headFrame.yawDeg : 0;
+      const pitchDeg = (headFrame && typeof headFrame.pitchDeg === 'number') ? headFrame.pitchDeg : 0;
+      ctx.fillText(`Yaw: ${yawDeg.toFixed(1)}°`, 10, 24);
+      ctx.fillText(`Pitch: ${pitchDeg.toFixed(1)}°`, 10, 48);
+      ctx.shadowBlur = 0;
+    } else if (headFrame) {
+      // Draw rotation even without face mesh landmarks
+      ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      ctx.font = 'bold 16px monospace';
+      ctx.shadowColor = 'rgba(0,0,0,0.8)';
+      ctx.shadowBlur = 4;
+      const yawDeg = typeof headFrame.yawDeg === 'number' ? headFrame.yawDeg : 0;
+      const pitchDeg = typeof headFrame.pitchDeg === 'number' ? headFrame.pitchDeg : 0;
       ctx.fillText(`Yaw: ${yawDeg.toFixed(1)}°`, 10, 24);
       ctx.fillText(`Pitch: ${pitchDeg.toFixed(1)}°`, 10, 48);
       ctx.shadowBlur = 0;
