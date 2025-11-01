@@ -1901,6 +1901,19 @@
       document.dispatchEvent(event);
     }
 
+    if (message.type === 'TRIGGER_MOUTH_CALIBRATION') {
+      debugLog('[Content] Triggering mouth calibration');
+      // Trigger Alt+M keyboard event to start mouth calibration
+      const event = new KeyboardEvent('keydown', {
+        key: 'm',
+        code: 'KeyM',
+        altKey: true,
+        bubbles: true,
+        cancelable: true
+      });
+      document.dispatchEvent(event);
+    }
+
     if (message.type === 'PING') {
       // Respond to ping to confirm content script is loaded
       sendResponse({ status: 'ok' });

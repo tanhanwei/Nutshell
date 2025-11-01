@@ -49,6 +49,7 @@
         <summary>Keyboard Shortcuts</summary>
         <ul>
           <li><kbd>Alt+H</kbd> - Calibrate head tracking</li>
+          <li><kbd>Alt+M</kbd> - Calibrate mouth click</li>
           <li><kbd>Alt+P</kbd> - Toggle pointer visibility</li>
           <li><kbd>Alt+V</kbd> - Toggle camera preview</li>
           <li><kbd>Shift+H</kbd> - Toggle debug HUD</li>
@@ -58,9 +59,34 @@
 
     <hr>
 
+    <!-- Mouth Click Section -->
+    <div id="mouth-click-section">
+      <h3>👄 Mouth Click (Optional)</h3>
+
+      <div class="setting-group">
+        <label class="toggle-container">
+          <input type="checkbox" id="mouth-click-enabled">
+          <span class="toggle-slider"></span>
+          <span class="toggle-label">Enable Mouth Click</span>
+        </label>
+        <p class="help-text">Open your mouth wide to trigger clicks</p>
+      </div>
+
+      <div class="status-indicator">
+        <span class="status-dot" id="mouth-status-dot"></span>
+        <span id="mouth-status-text">Not calibrated</span>
+      </div>
+
+      <button id="calibrate-mouth-btn" class="btn secondary">
+        Calibrate Mouth Click
+      </button>
+    </div>
+
+    <hr>
+
     <!-- Settings Section -->
     <div id="settings-section">
-      <h3>AI Summarization</h3>
+      <h3>🤖 AI Summarization</h3>
       
       <!-- Display Mode Selection -->
       <div class="setting-group">

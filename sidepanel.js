@@ -51,6 +51,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.calibrateBtn = document.getElementById('calibrate-btn');
     elements.dwellTime = document.getElementById('dwell-time');
     elements.dwellValue = document.getElementById('dwell-value');
+
+    // Mouth click controls
+    elements.mouthClickEnabled = document.getElementById('mouth-click-enabled');
+    elements.mouthStatusDot = document.getElementById('mouth-status-dot');
+    elements.mouthStatusText = document.getElementById('mouth-status-text');
+    elements.calibrateMouthBtn = document.getElementById('calibrate-mouth-btn');
     
     console.log('[Sidepanel] DOM elements retrieved:', {
       displayMode: elements.displayMode,
@@ -86,7 +92,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 // Load settings
 async function loadSettings() {
-  const stored = await chrome.storage.local.get(['apiChoice', 'customPrompt', 'displayMode', 'gazeEnabled', 'gazeDwellMs']);
+  const stored = await chrome.storage.local.get(['apiChoice', 'customPrompt', 'displayMode', 'gazeEnabled', 'gazeDwellMs', 'mouthClickEnabled', 'mouthCalV1']);
 
   if (stored.apiChoice) settings.apiChoice = stored.apiChoice;
   if (stored.customPrompt) settings.customPrompt = stored.customPrompt;
@@ -132,6 +138,20 @@ async function loadSettings() {
   if (!settings.gazeEnabled) {
     updateGazeStatus('ready', 'Enable to start');
   }
+
+  // Load mouth click settings
+  const mouthEnabled = stored.mouthClickEnabled || false;
+  if (elements.mouthClickEnabled) {
+    elements.mouthClickEnabled.checked = mouthEnabled;
+  }
+
+  // Update calibrate mouth button disabled state
+  if (elements.calibrateMouthBtn) {
+    elements.calibrateMouthBtn.disabled = !mouthEnabled;
+  }
+
+  // Update mouth calibration status
+  updateMouthStatus(!!stored.mouthCalV1);
 
   togglePromptContainer();
 }
@@ -273,6 +293,41 @@ function setupEventListeners() {
     });
   }
 
+  // Mouth click enabled toggle
+  if (elements.mouthClickEnabled) {
+    elements.mouthClickEnabled.addEventListener('change', async (e) => {
+      const enabled = e.target.checked;
+      chrome.storage.local.set({ mouthClickEnabled: enabled });
+      console.log('[Sidepanel] Mouth click toggled:', enabled);
+
+      // Update calibrate button disabled state
+      if (elements.calibrateMouthBtn) {
+        elements.calibrateMouthBtn.disabled = !enabled;
+      }
+    });
+  }
+
+  // Calibrate mouth button
+  if (elements.calibrateMouthBtn) {
+    elements.calibrateMouthBtn.addEventListener('click', () => {
+      console.log('[Sidepanel] Calibrate mouth button clicked');
+
+      // Blur the button to prevent SPACE from re-clicking it
+      elements.calibrateMouthBtn.blur();
+
+      // Send message to active tab to trigger mouth calibration
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs[0]) {
+          chrome.tabs.sendMessage(tabs[0].id, {
+            type: 'TRIGGER_MOUTH_CALIBRATION'
+          }).catch((error) => {
+            console.error('[Sidepanel] Failed to trigger mouth calibration:', error);
+          });
+        }
+      });
+    });
+  }
+
   // Dwell time slider
   if (elements.dwellTime) {
     elements.dwellTime.addEventListener('input', (e) => {
@@ -354,6 +409,22 @@ function updateGazeStatus(phase, note) {
   elements.gazeStatusText.textContent = status.text;
 }
 
+function updateMouthStatus(calibrated) {
+  if (!elements.mouthStatusDot || !elements.mouthStatusText) {
+    return;
+  }
+
+  // Remove all status classes
+  elements.mouthStatusDot.className = 'status-dot';
+
+  if (calibrated) {
+    elements.mouthStatusDot.classList.add('ready');
+    elements.mouthStatusText.textContent = 'Calibrated ✓';
+  } else {
+    elements.mouthStatusText.textContent = 'Not calibrated';
+  }
+}
+
 // Show states
 function hideAll() {
   // Hide content states, but NOT settings elements
@@ -428,5 +499,13 @@ function displayCachedSummary(title, formattedSummary) {
     elements.aiSummary.innerHTML = formattedSummary;
   }
 }
+
+// Listen for mouth calibration completion
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.mouthCalV1) {
+    console.log('[Sidepanel] Mouth calibration updated');
+    updateMouthStatus(!!changes.mouthCalV1.newValue);
+  }
+});
 
 console.log('[Sidepanel] Script loaded');

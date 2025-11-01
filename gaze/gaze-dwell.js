@@ -999,6 +999,18 @@
     beep(button === 2 ? 320 : 560, 150);
   });
 
+  // Smile-to-click: trigger click on magnetically snapped target when user smiles
+  window.addEventListener('smile:click', (event) => {
+    const target = lastSnapLink || nearestLink(lastPointerX, lastPointerY) || document.elementFromPoint(lastPointerX, lastPointerY);
+    if (!target) {
+      beep(280, 140);  // Error beep if no target
+      return;
+    }
+    synthClick(target, 0);  // Left click only (button = 0)
+    beep(660, 150);  // Higher pitch beep for smile click (distinguishable from blink)
+    console.debug(`[GazeDwell] Smile click executed on:`, target);
+  });
+
   function init() {
     ensureTooltipStyles();
     ensureScrollZones();

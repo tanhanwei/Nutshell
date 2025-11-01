@@ -28,6 +28,8 @@
   const HEAD_PITCH_SCALE = 20;
   const BLINK_LEFT_THRESHOLD_MS = 1000;
   const BLINK_RIGHT_THRESHOLD_MS = 2000;
+  const MOUTH_CALIBRATION_SAMPLES = 30;   // Samples to collect for mouth calibration
+  const MOUTH_OPEN_COOLDOWN_MS = 800;     // Prevent multiple clicks from sustained open mouth
   const BLINK_RELEASE_EVENT = 'blink:released';
   const EAR_OPEN_SAMPLES_REQUIRED = 60;
   const EAR_CLOSED_COLLECTION_MS = 700;
@@ -75,6 +77,11 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
   let blinkClosedAt = null;
   let blinkHoldEmitted = false;
   let previewFrameCount = 0;
+  let lastMouthClickTime = 0;            // Track last mouth-open click for cooldown
+  let lastMouthRatio = 0;                // Track mouth aspect ratio for debugging
+  let mouthCalibration = null;           // Stores { closedRatio, openRatio, threshold }
+  let mouthCalSamples = [];              // Temporary calibration samples
+  let mouthClickEnabled = false;         // Whether mouth clicking is enabled
 
   let gazeEnabled = false;
   if (typeof window.__gazeHeadMode !== 'boolean') {
@@ -219,6 +226,124 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
       }
     }
     return null;
+  }
+
+  // Calibrate mouth open/closed thresholds
+  function calibrateMouth() {
+    return new Promise((resolve) => {
+      console.log('[GazeCore] 👄 Starting mouth calibration...');
+
+      // Step 1: Collect closed mouth samples
+      mouthCalSamples = [];
+      const step1Message = `Close your mouth normally and look at the screen.\nCollecting ${MOUTH_CALIBRATION_SAMPLES} samples...`;
+
+      setTimeout(() => {
+        if (mouthCalSamples.length < MOUTH_CALIBRATION_SAMPLES) {
+          console.warn('[GazeCore] Not enough closed mouth samples, retrying...');
+          mouthCalSamples = [];
+          return calibrateMouth().then(resolve);
+        }
+
+        const closedRatio = mouthCalSamples.reduce((a, b) => a + b, 0) / mouthCalSamples.length;
+        console.log(`[GazeCore] ✓ Closed mouth ratio: ${closedRatio.toFixed(3)}`);
+
+        // Step 2: Collect open mouth samples
+        mouthCalSamples = [];
+        const step2Message = `Now OPEN your mouth wide!\nCollecting ${MOUTH_CALIBRATION_SAMPLES} samples...`;
+
+        setTimeout(() => {
+          if (mouthCalSamples.length < MOUTH_CALIBRATION_SAMPLES) {
+            console.warn('[GazeCore] Not enough open mouth samples, retrying...');
+            mouthCalSamples = [];
+            return calibrateMouth().then(resolve);
+          }
+
+          const openRatio = mouthCalSamples.reduce((a, b) => a + b, 0) / mouthCalSamples.length;
+          console.log(`[GazeCore] ✓ Open mouth ratio: ${openRatio.toFixed(3)}`);
+
+          // Calculate threshold (70% between closed and open)
+          const threshold = closedRatio + (openRatio - closedRatio) * 0.7;
+
+          mouthCalibration = { closedRatio, openRatio, threshold };
+          mouthCalSamples = [];
+
+          console.log(`[GazeCore] 🎉 Mouth calibration complete!`, mouthCalibration);
+          resolve(mouthCalibration);
+        }, 2000);
+
+      }, 2000);
+    });
+  }
+
+  // Calculate mouth aspect ratio (MAR) for mouth-open detection
+  // Returns ratio of mouth height to width (higher = more open)
+  function calculateMouthRatio(annotations) {
+    if (!annotations) {
+      if (!window.__mouthDebug1) {
+        console.warn('[GazeCore] No annotations for mouth detection');
+        window.__mouthDebug1 = true;
+      }
+      return 0;
+    }
+
+    if (!annotations.lipsUpperOuter || !annotations.lipsLowerOuter) {
+      if (!window.__mouthDebug2) {
+        console.warn('[GazeCore] No lip landmarks. Available:', Object.keys(annotations));
+        window.__mouthDebug2 = true;
+      }
+      return 0;
+    }
+
+    // Get lip landmarks
+    const upperLip = annotations.lipsUpperOuter;
+    const lowerLip = annotations.lipsLowerOuter;
+
+    // Debug log once
+    if (!window.__mouthDebug3) {
+      console.log('[GazeCore] Lip landmarks found!', {
+        upperLipLength: upperLip.length,
+        lowerLipLength: lowerLip.length,
+        upperSample: upperLip[5],
+        lowerSample: lowerLip[5]
+      });
+      window.__mouthDebug3 = true;
+    }
+
+    // Calculate vertical mouth opening (height)
+    // Use points: top center and bottom center (middle of arrays)
+    const topPoint = upperLip[Math.floor(upperLip.length / 2)];
+    const bottomPoint = lowerLip[Math.floor(lowerLip.length / 2)];
+
+    if (!topPoint || !bottomPoint) {
+      if (!window.__mouthDebug4) {
+        console.warn('[GazeCore] Missing center lip points');
+        window.__mouthDebug4 = true;
+      }
+      return 0;
+    }
+
+    const mouthHeight = Math.abs(bottomPoint[1] - topPoint[1]);
+
+    // Calculate horizontal mouth width
+    // Use points: left corner (first) and right corner (last)
+    const leftPoint = upperLip[0];
+    const rightPoint = upperLip[upperLip.length - 1];
+
+    if (!leftPoint || !rightPoint) {
+      if (!window.__mouthDebug5) {
+        console.warn('[GazeCore] Missing corner lip points');
+        window.__mouthDebug5 = true;
+      }
+      return 0;
+    }
+
+    const mouthWidth = Math.abs(rightPoint[0] - leftPoint[0]);
+
+    if (mouthWidth === 0) return 0;
+
+    // Mouth Aspect Ratio (MAR)
+    const mar = mouthHeight / mouthWidth;
+    return mar;
   }
 
   function computeHeadFrame(face) {
@@ -525,7 +650,7 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
           iris: { enabled: false },
           attention: false,
           description: false,
-          emotion: false,
+          emotion: { enabled: true },  // Changed from true to { enabled: true }
           antispoof: false,
           liveness: false
         },
@@ -538,6 +663,10 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
 
       try {
         await human.load();
+        console.log('[GazeCore] Human.js loaded. Config:', {
+          emotionEnabled: human.config.face.emotion,
+          allFaceConfig: human.config.face
+        });
       } catch (error) {
         console.error('[GazeCore] Failed to load Human.js models:', error);
         dispatchStatus('ready', 'Model load failed');
@@ -789,6 +918,34 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
     //     updateBlinkState(face.mesh, ts);
     //   }
     // }
+
+    // Mouth-open detection for click (more reliable than emotion detection)
+    if (face.annotations && !window.__gazeHeadCalActive) {
+      const mouthRatio = calculateMouthRatio(face.annotations);
+      lastMouthRatio = mouthRatio;
+      window.__lastMouthRatio = mouthRatio;  // Store globally for preview display and calibration
+
+      // Only detect clicks if calibrated, enabled, and NOT calibrating
+      if (mouthCalibration && mouthClickEnabled && !window.__gazeMouthCalActive) {
+        const threshold = mouthCalibration.threshold;
+
+        // Debug log mouth ratio - log every 100 frames to see patterns
+        if (!window.__mouthFrameCount) window.__mouthFrameCount = 0;
+        window.__mouthFrameCount++;
+        if (window.__mouthFrameCount % 100 === 0) {
+          console.log(`[GazeCore] Mouth stats: MAR=${mouthRatio.toFixed(3)}, threshold=${threshold.toFixed(3)}, calibration=`, mouthCalibration);
+        }
+
+        // Mouth open detected: ratio above calibrated threshold and cooldown period passed
+        if (mouthRatio > threshold && (ts - lastMouthClickTime) > MOUTH_OPEN_COOLDOWN_MS) {
+          lastMouthClickTime = ts;
+          window.dispatchEvent(new CustomEvent('smile:click', {
+            detail: { mouthRatio, ts }
+          }));
+          console.log(`[GazeCore] 👄 MOUTH OPEN CLICK! MAR: ${mouthRatio.toFixed(3)} > ${threshold.toFixed(3)}`);
+        }
+      }
+    }
 
     if (!probePrinted) {
       probeFace(face);
@@ -1072,8 +1229,28 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
 
       const yawDeg = (headFrame && typeof headFrame.yawDeg === 'number') ? headFrame.yawDeg : 0;
       const pitchDeg = (headFrame && typeof headFrame.pitchDeg === 'number') ? headFrame.pitchDeg : 0;
-      ctx.fillText(`Yaw: ${yawDeg.toFixed(1)}°`, 10, 24);
-      ctx.fillText(`Pitch: ${pitchDeg.toFixed(1)}°`, 10, 48);
+      // Hidden for now: Yaw/Pitch display
+      // ctx.fillText(`Yaw: ${yawDeg.toFixed(1)}°`, 10, 24);
+      // ctx.fillText(`Pitch: ${pitchDeg.toFixed(1)}°`, 10, 48);
+
+      // Display mouth-open ratio for debugging
+      const mouthRatio = window.__lastMouthRatio || 0;
+      const threshold = mouthCalibration ? mouthCalibration.threshold : 0.5;
+      const isMouthOpen = mouthCalibration && mouthClickEnabled && mouthRatio > threshold;
+      const calibrated = mouthCalibration ? '✓' : '✗';
+      const enabled = mouthClickEnabled ? '' : ' (OFF)';
+
+      if (!mouthClickEnabled) {
+        ctx.fillStyle = 'rgba(150,150,150,0.95)'; // Gray when disabled
+      } else if (isMouthOpen) {
+        ctx.fillStyle = 'rgba(0,255,100,1)'; // Green when clicking
+      } else if (mouthCalibration) {
+        ctx.fillStyle = 'rgba(255,255,255,0.95)'; // White when calibrated
+      } else {
+        ctx.fillStyle = 'rgba(255,100,100,0.95)'; // Red when not calibrated
+      }
+
+      ctx.fillText(`Mouth${calibrated}: ${(mouthRatio * 100).toFixed(0)}%${isMouthOpen ? ' CLICK!' : ''}${enabled}`, 10, 24);
       ctx.shadowBlur = 0;
     } else if (headFrame) {
       // Draw rotation even without face mesh landmarks
@@ -1083,8 +1260,28 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
       ctx.shadowBlur = 4;
       const yawDeg = typeof headFrame.yawDeg === 'number' ? headFrame.yawDeg : 0;
       const pitchDeg = typeof headFrame.pitchDeg === 'number' ? headFrame.pitchDeg : 0;
-      ctx.fillText(`Yaw: ${yawDeg.toFixed(1)}°`, 10, 24);
-      ctx.fillText(`Pitch: ${pitchDeg.toFixed(1)}°`, 10, 48);
+      // Hidden for now: Yaw/Pitch display
+      // ctx.fillText(`Yaw: ${yawDeg.toFixed(1)}°`, 10, 24);
+      // ctx.fillText(`Pitch: ${pitchDeg.toFixed(1)}°`, 10, 48);
+
+      // Display mouth-open ratio for debugging
+      const mouthRatio = window.__lastMouthRatio || 0;
+      const threshold = mouthCalibration ? mouthCalibration.threshold : 0.5;
+      const isMouthOpen = mouthCalibration && mouthClickEnabled && mouthRatio > threshold;
+      const calibrated = mouthCalibration ? '✓' : '✗';
+      const enabled = mouthClickEnabled ? '' : ' (OFF)';
+
+      if (!mouthClickEnabled) {
+        ctx.fillStyle = 'rgba(150,150,150,0.95)'; // Gray when disabled
+      } else if (isMouthOpen) {
+        ctx.fillStyle = 'rgba(0,255,100,1)'; // Green when clicking
+      } else if (mouthCalibration) {
+        ctx.fillStyle = 'rgba(255,255,255,0.95)'; // White when calibrated
+      } else {
+        ctx.fillStyle = 'rgba(255,100,100,0.95)'; // Red when not calibrated
+      }
+
+      ctx.fillText(`Mouth${calibrated}: ${(mouthRatio * 100).toFixed(0)}%${isMouthOpen ? ' CLICK!' : ''}${enabled}`, 10, 24);
       ctx.shadowBlur = 0;
     }
   }
@@ -1168,6 +1365,10 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
     } else if (changes.earCalV1 && changes.earCalV1.newValue) {
       console.debug('[GazeCore] Ignoring legacy blink calibration; will rebuild.');
     }
+    if (changes.mouthClickEnabled) {
+      mouthClickEnabled = changes.mouthClickEnabled.newValue || false;
+      console.log('[GazeCore] Mouth click enabled changed to:', mouthClickEnabled);
+    }
   }
 
   function handleVisibilityChange() {
@@ -1200,7 +1401,14 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
     }
   })();
 
-  storageGet([GAZE_ENABLED_KEY, HEAD_CAL_STORAGE_KEY, EAR_CAL_STORAGE_KEY, 'headCalV1', 'earCalV1']).then((store) => {
+  // Listen for mouth calibration completion
+  window.addEventListener('mouth-cal:complete', (event) => {
+    const cal = event.detail;
+    console.log('[GazeCore] Mouth calibration received:', cal);
+    mouthCalibration = cal;
+  });
+
+  storageGet([GAZE_ENABLED_KEY, HEAD_CAL_STORAGE_KEY, EAR_CAL_STORAGE_KEY, 'mouthCalV1', 'mouthClickEnabled', 'headCalV1', 'earCalV1']).then((store) => {
     if (store[HEAD_CAL_STORAGE_KEY]) {
       headCal = store[HEAD_CAL_STORAGE_KEY];
       headModeWarned = false;
@@ -1221,6 +1429,16 @@ let headAutoCenter = { nx: 0, ny: 0, ready: false };
     if (store[EAR_CAL_STORAGE_KEY]) {
       earCal = store[EAR_CAL_STORAGE_KEY];
       earCalStage = earCal && earCal.version === 2 ? 'done' : 'idle';
+    }
+
+    if (store.mouthCalV1) {
+      mouthCalibration = store.mouthCalV1;
+      console.log('[GazeCore] Loaded mouth calibration:', mouthCalibration);
+    }
+
+    if (typeof store.mouthClickEnabled === 'boolean') {
+      mouthClickEnabled = store.mouthClickEnabled;
+      console.log('[GazeCore] Mouth click enabled:', mouthClickEnabled);
     }
 
     if (typeof store[GAZE_ENABLED_KEY] === 'boolean') {
