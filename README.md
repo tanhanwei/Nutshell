@@ -1,24 +1,97 @@
 # 🥜 Nutshell
 
-> **Hands-free browsing powered by head tracking and AI**
+> **Hands-free browsing powered by head tracking and Chrome Built-in AI**
 
-Nutshell makes the web accessible to everyone by combining computer vision-based head tracking with Chrome's Built-In AI to enable completely hands-free browsing and instant link summaries.
+Nutshell makes the web accessible to everyone by combining computer vision-based head tracking with Chrome's Built-in AI to enable completely hands-free browsing and instant link summaries.
 
 ![Nutshell Banner](./screenshot.png)
 
+---
+
+## 🏆 Built for Chrome Built-in AI Hackathon
+
+Nutshell showcases the power of **Chrome's Built-in AI APIs** by bringing sophisticated, privacy-first accessibility directly into the browser. This project demonstrates real-world application of on-device AI to solve critical accessibility challenges.
+
+### 🎯 Chrome AI Features Utilized
+
+#### **1. Summarizer API** ⭐ Primary Feature
+- **Streaming summarization** with `summarizeStreaming()` for real-time updates
+- Configurable summary types: `key-points`, `tl;dr`, `teaser`, `headline`
+- Markdown-formatted output with adjustable length
+- **100% on-device processing** with Gemini Nano
+
+**Implementation Highlight:**
+```javascript
+const summarizer = await ai.summarizer.create({
+  type: 'key-points',
+  format: 'markdown',
+  length: 'medium',
+  sharedContext: 'This is an article from a webpage.',
+  outputLanguage: 'en'
+});
+
+const stream = summarizer.summarizeStreaming(processedText);
+for await (const chunk of stream) {
+  // Real-time UI updates as summary generates
+  updateTooltip(chunk);
+}
+```
+
+#### **2. Prompt API** ⭐ Advanced Custom Prompting
+- **Specialized content processing** for YouTube, Reddit, Twitter
+- Custom system prompts for context-aware summarization
+- Streaming responses with `promptStreaming()`
+
+**Example - YouTube Video Summaries:**
+```javascript
+const session = await ai.languageModel.create({
+  expectedOutputs: [{ type: 'text', languages: ['en'] }]
+});
+
+const prompt = `Analyze this YouTube video and create a structured summary:
+
+TRANSCRIPT: ${captionText}
+DESCRIPTION: ${videoDescription}
+
+Provide: Main theme, key points (3-5 bullets), important timestamps`;
+
+const stream = session.promptStreaming(prompt);
+```
+
+### 🌟 Why Chrome Built-in AI?
+
+**Privacy by Design:**
+- ✅ Zero data sent to external servers
+- ✅ Camera feed processed locally with Human.js
+- ✅ AI runs entirely in browser with Gemini Nano
+- ✅ Perfect for users with disabilities who need privacy-respecting tools
+
+**Accessibility at Scale:**
+- ✅ No expensive hardware ($0 vs. $10,000+ for eye-gaze systems)
+- ✅ No cloud API costs
+- ✅ Instant responses (no network latency)
+- ✅ Works offline after model download
+- ✅ Democratizes assistive technology
+
+---
+
 ## 🎥 Demo Video
 
-> **[📹 Watch the demo video here](#)** *(Coming soon!)*
+> **[📹 Watch the demo video](#)** *(Coming soon!)*
 
-See Nutshell in action - browse Wikipedia entirely hands-free and get AI-powered summaries with just a head movement!
+See Nutshell in action - browse Wikipedia entirely hands-free and get AI-powered summaries with just head movements!
 
 ---
 
 ## 🌟 The Problem
 
-For millions of people with mobility impairments, repetitive strain injuries, or temporary disabilities, using a traditional mouse and keyboard can be painful, difficult, or impossible. Existing assistive technologies often require expensive hardware, complex setup, or compromise on user experience.
+For millions of people with mobility impairments, ALS, cerebral palsy, RSI, or temporary disabilities, using a traditional mouse and keyboard is painful, difficult, or impossible. Existing assistive technologies often:
+- Cost $10,000+ for eye-gaze systems
+- Require specialized hardware and setup
+- Send data to cloud servers (privacy concerns)
+- Don't work in web browsers
 
-At the same time, the web is full of links—but clicking them means committing to a full page load just to see if the content is relevant. This creates friction for everyone, but especially for users who rely on alternative input methods where every interaction has a higher cost.
+Meanwhile, browsing the web means clicking countless links just to preview content—creating friction for everyone, especially users relying on alternative input methods.
 
 ---
 
@@ -26,218 +99,376 @@ At the same time, the web is full of links—but clicking them means committing 
 
 **Nutshell** solves both problems with two powerful features:
 
-### 1. 🎯 Head Tracking (Hands-Free Cursor Control)
-Using your computer's webcam and facial recognition AI, Nutshell translates your head movements into precise cursor control:
-- **Look left/right** → cursor moves horizontally
-- **Tilt up/down** → cursor moves vertically
-- **Dwell on a link** → automatically activates it (no clicking needed!)
+### 1. 🎯 Complete Hands-Free Control
 
-No special hardware required—just your built-in webcam.
+**Head Tracking:**
+- Look left/right → cursor moves horizontally
+- Tilt up/down → cursor moves vertically
+- Uses One-Euro filter for smooth, jitter-free movement
+- Personalized calibration adapts to your natural range
 
-### 2. 🤖 AI-Powered Link Summaries
-Nutshell uses **Chrome's Built-In AI** to instantly summarize any link you hover over:
-- Extracts the article content automatically
-- Generates a concise summary in seconds using on-device AI
-- Shows summaries in an elegant tooltip or side panel
-- Works completely offline (no data sent to external servers!)
+**Mouth-Open Clicking:**
+- Open mouth → triggers click
+- Calibrated to your facial structure
+- 800ms cooldown prevents accidental double-clicks
+- Real-time visual feedback
 
-**The result?** Browse the web entirely hands-free while getting instant previews of every link—all without leaving your current page.
+**Dwell-Based Interaction:**
+- Hover on links → automatic activation
+- Visual progress indicator (growing ring)
+- Magnetic snapping to nearby clickables (45px radius)
+- Configurable timing (300-1500ms)
 
----
+**Smart Navigation Zones:**
+- Look top/bottom → auto-scroll (180px zones)
+- Look left edge → browser back (80px zone)
+- Look right edge → browser forward (80px zone)
+- Colored visual feedback shows active zones
 
-## 🏆 Chrome Built-In AI Challenge
+### 2. 🤖 AI-Powered Link Previews
 
-Nutshell is built for the [Chrome Built-In AI Challenge](https://developer.chrome.com/docs/ai/built-in) and leverages Chrome's latest on-device AI capabilities:
+**Chrome's Built-in AI** generates instant summaries for:
+- 📄 **Web articles** - Clean, concise key points
+- 🎥 **YouTube videos** - Summarized from captions + description
+- 🧵 **Reddit threads** - Post + top comments analyzed
+- 🐦 **Twitter/X threads** - Complete conversation summaries
 
-### ✅ **Summarization API**
-- Generates high-quality, concise summaries of web content
-- Runs entirely on-device using **Gemini Nano**
-- Configurable summary types (key-points, tl;dr, teaser, headline)
-- No network latency, no privacy concerns
+**Special Feature: YouTube Caption Extraction**
+- Intercepts XHR requests for captions
+- Supports JSON3 (new) and XML (legacy) formats
+- Combines transcript + description for better context
+- All processed on-device by Gemini Nano
 
-### ✅ **Prompt API** (Optional)
-- Allows users to customize their own summarization prompts
-- Full control over summary style and length
-- Powered by the same local Gemini Nano model
-
-**Why this matters:** By using Chrome's Built-In AI, Nutshell delivers instant, privacy-respecting summaries without requiring external API keys, internet connectivity, or sending your data to third-party servers.
+**No cloud, no data collection, just pure private accessibility.**
 
 ---
 
 ## ✨ Key Features
 
-- **🎯 Head Tracking**: Control your cursor entirely with head movements—no hands required
-- **📷 Webcam-Based**: Works with any standard webcam, no special hardware needed
-- **🎚️ Calibration System**: Personalized 6-point calibration adapts to your range of motion
-- **⏱️ Configurable Dwell Time**: Adjust how long to "hover" before activating (300-1200ms)
-- **🤖 On-Device AI**: Summaries generated locally using Chrome's Gemini Nano model
-- **🎨 Dual Display Modes**: Show summaries in tooltips, side panel, or both
-- **⌨️ Keyboard Shortcuts**: Quick access to calibration, camera preview, and debug tools
-- **🔒 Privacy-First**: All processing happens locally—no data leaves your device
-- **🎨 Beautiful UI**: Clean, accessible interface with the adorable Nutshell mascot
+### Hands-Free Control
+- 🎯 **Head tracking** cursor control (no hands required)
+- 👄 **Mouth-open clicking** with calibration
+- ⏱️ **Dwell activation** (hover to click)
+- 🧲 **Magnetic snapping** helps target links
+- 📜 **Auto-scrolling** zones (top/bottom)
+- ⬅️➡️ **Browser navigation** zones (left/right edges)
+
+### AI Summaries
+- 🤖 **On-device AI** (Gemini Nano via Chrome)
+- 📺 **YouTube caption** extraction & summarization
+- 🧵 **Thread summaries** (Reddit, Twitter/X)
+- ⚡ **Real-time streaming** updates
+- 💾 **Smart caching** (30-minute retention)
+- 🎨 **Dual display** (tooltip + side panel)
+
+### Customization
+- 🎚️ **Adjustable dwell time** (300-1500ms)
+- 🎯 **Head calibration** (5-point personalization)
+- 👄 **Mouth calibration** (adaptive thresholds)
+- 🎨 **Display modes** (tooltip, panel, or both)
+- ⚙️ **API choice** (Summarizer or custom Prompt)
+
+### Privacy & Performance
+- 🔒 **100% local processing** (no external servers)
+- 📷 **Webcam-based** (any standard camera)
+- ⚡ **GPU-accelerated** tracking (WebGL)
+- 🎯 **Lightweight** (~2MB extension)
 
 ---
 
 ## 🚀 Installation
 
 ### Prerequisites
-- **Chrome Browser**: Version 127+ with Built-In AI enabled
-- **Webcam**: Any standard webcam (built-in or external)
-- **Enable Chrome AI**: Follow [these instructions](https://developer.chrome.com/docs/ai/built-in) to enable Chrome's experimental AI features
 
-### Steps
+1. **Chrome Dev or Canary** (version 128+)
+   - Download: [Chrome Dev](https://www.google.com/chrome/dev/) or [Chrome Canary](https://www.google.com/chrome/canary/)
 
-1. **Clone the repository**
+2. **Enable Chrome AI Flags:**
+   - Navigate to `chrome://flags/#optimization-guide-on-device-model`
+   - Set to **"Enabled BypassPerfRequirement"**
+   - Navigate to `chrome://flags/#prompt-api-for-gemini-nano`
+   - Set to **"Enabled"**
+   - Navigate to `chrome://flags/#summarization-api-for-gemini-nano`
+   - Set to **"Enabled"**
+   - **Restart Chrome**
+
+3. **Verify Model Download:**
+   - Open DevTools Console (F12)
+   - Run: `await ai.summarizer.availability()`
+   - Should return `"readily"` or `"available"`
+   - If `"downloadable"`, wait 5-10 minutes for model download
+
+### Install Extension
+
+1. **Clone repository:**
    ```bash
-   git clone https://github.com/yourusername/nutshell-extension.git
-   cd nutshell-extension
+   git clone https://github.com/yourusername/nutshell.git
+   cd nutshell
    ```
 
-2. **Load the extension**
-   - Open Chrome and navigate to `chrome://extensions/`
-   - Enable "Developer mode" (top right)
-   - Click "Load unpacked"
-   - Select the `hover-preview-extension` folder
+2. **Load extension:**
+   - Open `chrome://extensions/`
+   - Enable **"Developer mode"** (toggle top-right)
+   - Click **"Load unpacked"**
+   - Select the repository folder
 
-3. **Download AI Model** (First time only)
-   - Click the Nutshell icon in your toolbar
-   - If using Prompt API, you'll be prompted to download the Gemini Nano model (~2GB, one-time)
-   - The Summarization API model downloads automatically when first used
-
-4. **Grant Camera Permission**
-   - When you enable head tracking, Chrome will request camera access
-   - Click "Allow" to enable hands-free cursor control
+3. **Grant permissions:**
+   - Click Nutshell icon in toolbar
+   - Allow camera access when prompted
+   - Wait for models to load (~5-10 seconds)
 
 ---
 
 ## 🎮 How to Use
 
-### Getting Started
+### First-Time Setup
 
-1. **Open the Side Panel**
-   - Click the Nutshell icon in your Chrome toolbar
-   - The side panel will open with all controls
+#### 1. **Enable Head Tracking**
+- Open Nutshell side panel (click extension icon)
+- Toggle **"Enable Head Tracking"**
+- Grant camera permission
+- Wait for face detection models to load
 
-2. **Enable Head Tracking**
-   - Toggle "Enable Head Tracking" in the side panel
-   - Grant camera permission when prompted
+#### 2. **Calibrate Head Control**
+- Click **"Calibrate Head Tracking"** (or press `Alt+H`)
+- Follow 5-point calibration:
+  1. Look at CENTER → press SPACE
+  2. Look LEFT → press SPACE
+  3. Look RIGHT → press SPACE
+  4. Look UP → press SPACE
+  5. Look DOWN → press SPACE
+- Cursor now follows your head! 🎉
 
-3. **Calibrate Your Head Position**
-   - Click "Calibrate Head Position" (or press `Alt+H`)
-   - Follow the 6-point calibration instructions
-   - Look at each circle and hold for a moment
-   - Click "Done" when complete
+#### 3. **Calibrate Mouth Clicking** (Optional)
+- Toggle **"Enable Mouth Click"**
+- Click **"Calibrate Mouth Click"** (or press `Alt+M`)
+- Keep mouth closed when prompted
+- Open mouth wide when prompted
+- Test by opening mouth to click
 
-4. **Start Browsing!**
-   - Navigate to any webpage (Wikipedia works great!)
-   - Move your head to control the cursor
-   - Dwell on a link for 600ms (adjustable) to preview it
-   - An AI summary appears instantly in a tooltip
-   - Dwell on the summary's close button to dismiss it
+### Daily Usage
+
+1. **Navigate** - Move head to control cursor
+2. **Preview links** - Hover over any link for 600ms
+3. **Click** - Open mouth OR dwell on buttons/links
+4. **Scroll** - Look at top (scroll up) or bottom (scroll down)
+5. **Navigate** - Look at left edge (back) or right edge (forward)
 
 ### Keyboard Shortcuts
 
 | Shortcut | Action |
 |----------|--------|
 | `Alt+H` | Calibrate head tracking |
-| `Alt+P` | Toggle pointer visibility |
-| `Alt+V` | Toggle camera preview |
-| `Shift+H` | Toggle debug HUD |
-
-### Tips for Best Results
-
-- **Good Lighting**: Ensure your face is well-lit for better tracking accuracy
-- **Steady Position**: Keep your torso relatively stable; move your head, not your whole body
-- **Recalibrate**: If tracking feels off, just recalibrate—it takes 10 seconds!
-- **Adjust Dwell Time**: If you're accidentally clicking links, increase the dwell time slider
-- **Test on Wikipedia**: Wikipedia's dense inline links are perfect for testing
+| `Alt+M` | Calibrate mouth clicking |
+| `Esc` | Cancel active summary |
 
 ---
 
-## 🛠️ Tech Stack
+## 🛠️ Technical Architecture
 
-### Head Tracking
-- **[Human.js](https://github.com/vladmandic/human)**: MediaPipe-based face detection and pose estimation
-- **WebGL**: GPU-accelerated real-time processing
-- **One-Euro Filter**: Advanced smoothing for jitter-free cursor movement
+### Tech Stack
 
-### AI Summarization
-- **Chrome Summarization API**: Built-in, on-device AI using Gemini Nano
-- **Chrome Prompt API**: Custom prompts for personalized summaries
-- **Readability.js**: Content extraction from web pages
+#### Computer Vision
+- **[Human.js](https://github.com/vladmandic/human)** - 468-point facial landmark detection
+- **One-Euro Filter** - Jitter elimination (fc=0.4, β=0.0025)
+- **Adaptive Smoothing** - Lerp interpolation (0.06 center, 0.10 edge)
+- **WebGL Acceleration** - GPU-based processing
 
-### Browser Integration
-- **Chrome Extension Manifest V3**: Modern extension architecture
-- **Side Panel API**: Dedicated UI for controls and summaries
-- **Content Scripts**: Page interaction and tooltip rendering
+#### AI Integration
+- **Chrome Summarizer API** - Key-point extraction, markdown formatting
+- **Chrome Prompt API** - Custom prompting for specialized content
+- **Gemini Nano** - On-device language model
+- **Streaming Responses** - Real-time character-by-character updates
+
+#### Content Extraction
+- **Readability.js** - Mozilla's article extraction
+- **XHR Interception** - YouTube caption capture
+- **GraphQL Interception** - Twitter/X thread capture
+- **Smart Truncation** - Beginning/middle/end preservation for long content
+
+#### Browser Integration
+- **Manifest V3** - Modern extension architecture
+- **Side Panel API** - Dedicated control interface
+- **Content Scripts** - Page interaction & tooltip rendering
+- **Background Service Worker** - AI processing & job management
+
+### How It Works
+
+#### Head Tracking Pipeline
+```
+Webcam Feed → Human.js (Face Detection) → Facial Landmarks (468 points)
+→ Head Pose Estimation (pitch/yaw) → One-Euro Filter (smoothing)
+→ Screen Coordinates → Mouse Events → Dwell Detection → Action
+```
+
+#### AI Summary Pipeline
+```
+Link Hover (600ms) → Fetch Page HTML → Readability.js (Extract Content)
+→ Smart Truncation (fit context) → Chrome Summarizer/Prompt API
+→ Gemini Nano Processing → Streaming Response → Tooltip Display
+```
+
+#### YouTube Special Pipeline
+```
+Page Load → Inject XHR Interceptor → Monitor Network Requests
+→ Capture Caption Response (JSON/XML) → Parse Timestamps & Text
+→ Combine with Video Description → Custom Prompt API Call
+→ Structured Summary → Display
+```
 
 ---
 
-## 🎯 How It Works
+## 📁 Project Structure
 
-### Head Tracking Pipeline
-
-1. **Face Detection**: Human.js detects 468 facial landmarks in real-time
-2. **Pose Estimation**: Calculates head rotation (yaw/pitch) from facial mesh
-3. **Coordinate Mapping**: Converts rotation angles to screen coordinates
-4. **Smoothing**: One-Euro filter removes jitter while preserving responsiveness
-5. **Cursor Control**: Dispatches mouse events to the active element
-6. **Dwell Detection**: Tracks hover time and triggers actions at threshold
-
-### AI Summary Pipeline
-
-1. **Link Hover**: User dwells on a link for configured duration
-2. **Content Fetch**: Background script fetches the target page
-3. **Content Extraction**: Readability.js extracts clean article text
-4. **AI Processing**: Chrome's Summarization API generates concise summary
-5. **Display**: Summary appears in tooltip/panel with markdown formatting
+```
+nutshell/
+├── manifest.json              # Extension config (MV3)
+├── background.js              # AI processing, job management
+├── content.js                 # Link detection, tooltips
+├── sidepanel.js/.html         # Settings UI
+│
+├── gaze/                      # Head tracking system
+│   ├── gaze-core.js           # Computer vision, Human.js
+│   ├── gaze-dwell.js          # Dwell detection, interaction
+│   ├── gaze-overlay.js        # Visual feedback (zones)
+│   ├── head-cal.js            # Head calibration
+│   ├── mouth-cal.js           # Mouth click calibration
+│   └── human/                 # Human.js + TensorFlow models
+│
+├── youtube/                   # YouTube features
+│   ├── youtube-caption-handler.js    # XHR interception
+│   └── youtube-content-bridge.js     # Content script bridge
+│
+├── twitter/                   # Twitter/X integration
+│   └── twitter-interceptor.js        # GraphQL interception
+│
+├── lib/                       # Third-party libraries
+│   └── Readability.js         # Mozilla content extraction
+│
+└── icons/                     # Extension icons
+```
 
 ---
 
-## 🎨 Customization
+## 🧪 Development
 
-### Display Settings
-- **Location**: Choose tooltip-only, side panel-only, or both
-- **API Choice**: Use Summarization API or write custom prompts
-- **Custom Prompts**: "Summarize in 3 bullet points," "Explain like I'm 5," etc.
+### Debug Mode
 
-### Head Tracking Settings
-- **Dwell Time**: 300ms (fast) to 1200ms (deliberate)
-- **Pointer Visibility**: Toggle the visual cursor indicator
-- **Camera Preview**: See what the tracking system sees
-- **Debug HUD**: View FPS, confidence scores, and tracking status
+Enable logging in respective files:
+- `content.js`: `const DEBUG_ENABLED = true`
+- `gaze-dwell.js`: `const DEBUG_DWELL = true`
+
+### Test Chrome AI APIs
+
+Open DevTools console on any page:
+
+```javascript
+// Check Summarizer API
+const summarizerStatus = await ai.summarizer.availability();
+console.log('Summarizer:', summarizerStatus);
+
+// Check Prompt API
+const promptStatus = await ai.languageModel.availability();
+console.log('Prompt API:', promptStatus);
+
+// Test summarization
+if (summarizerStatus === 'readily') {
+  const summarizer = await ai.summarizer.create({
+    type: 'key-points',
+    format: 'markdown',
+    length: 'short'
+  });
+
+  const result = await summarizer.summarize('Your text here...');
+  console.log(result);
+}
+```
+
+### Performance Monitoring
+
+Check browser console for:
+- Frame processing times (target: 30fps)
+- AI streaming latency
+- Cache hit rates
+- Job abort reasons
+
+---
+
+## 🐛 Troubleshooting
+
+### AI Not Working
+- ✅ Verify Chrome flags enabled (see Installation)
+- ✅ Check API status: `await ai.summarizer.availability()`
+- ✅ Wait for model download (~5 min first time)
+- ✅ Restart Chrome after enabling flags
+
+### Head Tracking Issues
+- ✅ Good lighting (front-facing light works best)
+- ✅ Camera permissions granted
+- ✅ Recalibrate if cursor feels off
+- ✅ Keep torso stable, move head not body
+
+### Cursor Jittery
+- ✅ Recalibrate head tracking
+- ✅ Improve lighting conditions
+- ✅ Ensure stable seated position
+- ✅ Adjust `HEAD_FILTER_MIN_CUTOFF` in `gaze-core.js`
+
+### Mouth Clicks Not Working
+- ✅ Recalibrate mouth detection
+- ✅ Ensure camera sees mouth clearly
+- ✅ Toggle "Enable Mouth Click" on
+- ✅ Exaggerate opening during calibration
+
+---
+
+## 📊 Technical Specifications
+
+| Feature | Specification |
+|---------|--------------|
+| **AI Model** | Gemini Nano (Chrome Built-in) |
+| **Face Detection** | 468-point facial landmarks (Human.js) |
+| **Signal Filter** | One-Euro (fc=0.4, β=0.0025, d_cutoff=1.0) |
+| **Smoothing** | Adaptive lerp (0.06 center, 0.10 edge) |
+| **Dwell Time** | 600ms default (300-1500ms range) |
+| **Click Cooldown** | 800ms (mouth-open) |
+| **Snap Radius** | 45px magnetic targeting |
+| **Scroll Zones** | 180px top/bottom edges |
+| **Nav Zones** | 80px left/right edges |
+| **Cache TTL** | 30 minutes |
+| **Max Content** | 4000 chars (Summarizer), 3000 chars (Prompt) |
 
 ---
 
 ## 🌍 Use Cases
 
 ### Accessibility
-- Users with **mobility impairments** (paralysis, arthritis, etc.)
-- **Repetitive strain injury (RSI)** prevention and management
-- **Temporary disabilities** (broken arm, surgery recovery)
-- Alternative input method for **motor control challenges**
+- ♿ Users with mobility impairments (paralysis, ALS, cerebral palsy)
+- 🤕 Repetitive strain injury (RSI) prevention/management
+- 🩹 Temporary disabilities (broken arm, surgery recovery)
+- 🧠 Alternative input for motor control challenges
 
 ### Productivity
-- Hands-free research while taking notes or eating
-- Quick link previews without page navigation
-- Multitasking with second screen setups
-- Reducing context-switching friction
+- 📝 Hands-free research while taking notes
+- 🍕 Browse while eating or multitasking
+- 💻 Second screen setups
+- ⚡ Quick link previews without navigation
 
 ### Research & Learning
-- Rapid information gathering on Wikipedia
-- Academic paper browsing with quick summaries
-- News aggregation with preview-before-commit
-- Learning new topics with guided exploration
+- 📚 Wikipedia exploration
+- 📄 Academic paper browsing
+- 📰 News aggregation
+- 🎓 Topic learning with previews
 
 ---
 
 ## 🙏 Acknowledgments
 
 Built with amazing open-source tools:
-- **[Human.js](https://github.com/vladmandic/human)** by Vladimir Mandic - Face tracking library
+- **[Human.js](https://github.com/vladmandic/human)** by Vladimir Mandic - Face tracking
 - **[Readability.js](https://github.com/mozilla/readability)** by Mozilla - Content extraction
-- **Chrome Built-In AI** by Google - On-device AI models
-- **Nutshell mascot** - Designed with love 🥜
+- **Chrome Built-in AI** by Google - On-device AI with Gemini Nano
+- **One-Euro Filter** by Géry Casiez - Signal smoothing algorithm
 
 ---
 
@@ -249,27 +480,30 @@ MIT License - see [LICENSE](LICENSE) for details
 
 ## 🤝 Contributing
 
-This project was built for the Chrome Built-In AI Challenge. Contributions, issues, and feature requests are welcome!
+Built for the Chrome Built-in AI Hackathon! Contributions welcome:
 
 1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+2. Create feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit changes (`git commit -m 'Add amazing feature'`)
+4. Push branch (`git push origin feature/amazing-feature`)
+5. Open Pull Request
 
 ---
 
-## 📬 Contact
+## 🔗 Resources
 
-**Your Name** - [@yourtwitter](https://twitter.com/yourtwitter)
-
-Project Link: [https://github.com/yourusername/nutshell-extension](https://github.com/yourusername/nutshell-extension)
+- [Chrome Built-in AI Documentation](https://developer.chrome.com/docs/ai/built-in)
+- [Gemini Nano Information](https://deepmind.google/technologies/gemini/nano/)
+- [Human.js GitHub](https://github.com/vladmandic/human)
+- [Web Accessibility Guidelines](https://www.w3.org/WAI/standards-guidelines/)
 
 ---
 
 <div align="center">
 
-**Made with ❤️ for accessibility and powered by Chrome's Built-In AI**
+**Made with ❤️ for the Chrome Built-in AI Hackathon**
+
+*Empowering digital independence through on-device AI*
 
 🥜 *In a nutshell: Browse hands-free, understand faster.*
 
