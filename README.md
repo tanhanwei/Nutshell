@@ -77,7 +77,7 @@ const stream = session.promptStreaming(prompt);
 
 ## 🎥 Demo Video
 
-> **[📹 Watch the demo video](#)** *(Coming soon!)*
+> **[📹 Watch the demo video](https://youtu.be/KVOM2VvWypE?si=3GpD8lM9ZrEP934)** *(Coming soon!)*
 
 See Nutshell in action - browse Wikipedia entirely hands-free and get AI-powered summaries with just head movements!
 
