@@ -38,7 +38,7 @@ for await (const chunk of stream) {
 ```
 
 #### **2. Prompt API** ⭐ Advanced Custom Prompting
-- **Specialized content processing** for YouTube, Reddit, Twitter
+- **Specialized content processing** for YouTube
 - Custom system prompts for context-aware summarization
 - Streaming responses with `promptStreaming()`
 
@@ -130,8 +130,6 @@ Meanwhile, browsing the web means clicking countless links just to preview conte
 **Chrome's Built-in AI** generates instant summaries for:
 - 📄 **Web articles** - Clean, concise key points
 - 🎥 **YouTube videos** - Summarized from captions + description
-- 🧵 **Reddit threads** - Post + top comments analyzed
-- 🐦 **Twitter/X threads** - Complete conversation summaries
 
 **Special Feature: YouTube Caption Extraction**
 - Intercepts XHR requests for captions
@@ -156,7 +154,6 @@ Meanwhile, browsing the web means clicking countless links just to preview conte
 ### AI Summaries
 - 🤖 **On-device AI** (Gemini Nano via Chrome)
 - 📺 **YouTube caption** extraction & summarization
-- 🧵 **Thread summaries** (Reddit, Twitter/X)
 - ⚡ **Real-time streaming** updates
 - 💾 **Smart caching** (30-minute retention)
 - 🎨 **Dual display** (tooltip + side panel)
@@ -283,7 +280,6 @@ Meanwhile, browsing the web means clicking countless links just to preview conte
 #### Content Extraction
 - **Readability.js** - Mozilla's article extraction
 - **XHR Interception** - YouTube caption capture
-- **GraphQL Interception** - Twitter/X thread capture
 - **Smart Truncation** - Beginning/middle/end preservation for long content
 
 #### Browser Integration
