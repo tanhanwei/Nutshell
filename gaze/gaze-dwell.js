@@ -15,6 +15,7 @@
   const DEADZONE_PX = 12;
   const STICKY_RADIUS_PX = 45;
   const SCROLL_ZONE_ID = 'gaze-scroll-zones';
+  const NAV_ZONE_WIDTH = 80; // Width of left/right navigation zones in pixels
   const DWELL_INDICATOR_ID = 'gaze-dwell-indicator';
 
   let gazeEnabled = false;
@@ -38,6 +39,8 @@
   let snappedTarget = null; // Can be link or close button
   let lastSnapLink = null;
   let scrollZones = null;
+  let navZoneDwelling = null; // Track which nav zone we're dwelling in: 'back' or 'forward'
+  let navDwellStart = 0; // When nav zone dwell started
   let dwellIndicator = null;
   const edgeHold = {
     top: 0,
@@ -94,10 +97,54 @@
       transition: opacity 0.2s ease;
     `;
 
+    // Left navigation zone (Back) - Purple gradient
+    const leftZone = document.createElement('div');
+    leftZone.id = 'gaze-nav-left';
+    leftZone.style.cssText = `
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: ${NAV_ZONE_WIDTH}px;
+      background: linear-gradient(90deg, rgba(147, 51, 234, 0.15) 0%, rgba(147, 51, 234, 0) 100%);
+      border-right: 1px solid rgba(147, 51, 234, 0.3);
+      opacity: 0;
+      transition: opacity 0.2s ease;
+    `;
+
+    // Right navigation zone (Forward) - Orange gradient
+    const rightZone = document.createElement('div');
+    rightZone.id = 'gaze-nav-right';
+    rightZone.style.cssText = `
+      position: absolute;
+      right: 0;
+      top: 0;
+      bottom: 0;
+      width: ${NAV_ZONE_WIDTH}px;
+      background: linear-gradient(270deg, rgba(251, 146, 60, 0.15) 0%, rgba(251, 146, 60, 0) 100%);
+      border-left: 1px solid rgba(251, 146, 60, 0.3);
+      opacity: 0;
+      transition: opacity 0.2s ease;
+    `;
+
     scrollZones.appendChild(topZone);
     scrollZones.appendChild(bottomZone);
+    scrollZones.appendChild(leftZone);
+    scrollZones.appendChild(rightZone);
     document.body.appendChild(scrollZones);
     return scrollZones;
+  }
+
+  function updateNavZoneVisibility(leftActive, rightActive) {
+    if (!scrollZones) return;
+    const leftZone = document.getElementById('gaze-nav-left');
+    const rightZone = document.getElementById('gaze-nav-right');
+    if (leftZone) {
+      leftZone.style.opacity = leftActive ? '1' : '0';
+    }
+    if (rightZone) {
+      rightZone.style.opacity = rightActive ? '1' : '0';
+    }
   }
 
   function updateScrollZoneVisibility(topIntensity, bottomIntensity) {
@@ -604,6 +651,25 @@
     const { x, y } = applyDeadzone(rawX, rawY);
 
     const ts = typeof detail.ts === 'number' ? detail.ts : performance.now();
+
+    // Check if in navigation zones (left = back, right = forward)
+    const inLeftZone = rawX < NAV_ZONE_WIDTH;
+    const inRightZone = rawX > (window.innerWidth - NAV_ZONE_WIDTH);
+
+    // Update navigation zone visibility
+    updateNavZoneVisibility(inLeftZone, inRightZone);
+
+    // Track navigation zone dwelling
+    if (inLeftZone && navZoneDwelling !== 'back') {
+      navZoneDwelling = 'back';
+      navDwellStart = ts;
+    } else if (inRightZone && navZoneDwelling !== 'forward') {
+      navZoneDwelling = 'forward';
+      navDwellStart = ts;
+    } else if (!inLeftZone && !inRightZone) {
+      navZoneDwelling = null;
+      navDwellStart = 0;
+    }
     const delta = Math.max(0, Math.min(500, ts - lastPointTs));
     lastPointTs = ts;
 
@@ -1001,6 +1067,29 @@
 
   // Smile-to-click: trigger click on magnetically snapped target when user smiles
   window.addEventListener('smile:click', (event) => {
+    // Priority 1: Check if dwelling in navigation zone
+    if (navZoneDwelling) {
+      const now = performance.now();
+      const dwellDuration = now - navDwellStart;
+
+      // Require at least 300ms dwell before confirming navigation
+      if (dwellDuration >= 300) {
+        if (navZoneDwelling === 'back') {
+          window.history.back();
+          beep(400, 100); // Low beep for back
+          console.debug('[GazeDwell] Navigate BACK via mouth click');
+        } else if (navZoneDwelling === 'forward') {
+          window.history.forward();
+          beep(800, 100); // High beep for forward
+          console.debug('[GazeDwell] Navigate FORWARD via mouth click');
+        }
+        navZoneDwelling = null;
+        navDwellStart = 0;
+        return;
+      }
+    }
+
+    // Priority 2: Click on snapped target or nearest link
     const target = lastSnapLink || nearestLink(lastPointerX, lastPointerY) || document.elementFromPoint(lastPointerX, lastPointerY);
     if (!target) {
       beep(280, 140);  // Error beep if no target
